@@ -2,7 +2,7 @@
 
 import type { SafeStorage } from "./storage.js";
 
-export const LIB_VERSION = "0.1.0";
+export const LIB_VERSION = "0.1.1";
 
 /** RFC4122-ish v4 id; uses crypto when available, falls back gracefully. */
 export function uuid(): string {

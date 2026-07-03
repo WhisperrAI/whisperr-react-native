@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.1
+
+- Expose `./package.json` through the exports map so RN/Expo tooling can
+  resolve it.
+
 ## 0.1.0
 
 - Initial React Native SDK for Whisperr ingestion.
