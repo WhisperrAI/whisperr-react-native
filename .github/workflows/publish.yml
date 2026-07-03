@@ -1,0 +1,42 @@
+name: Publish
+
+# Publishes @whisperr/react-native when a version tag is pushed:
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# Auth: npm Trusted Publishing (OIDC) — NO stored token. Configure a Trusted
+# Publisher for the package on npmjs.com (Settings → Publishing access →
+# GitHub Actions: repo WhisperrAI/whisperr-react-native, workflow publish.yml,
+# environment production). Publishes with provenance attestations.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  id-token: write # required for OIDC trusted publishing + provenance
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: WhisperrAI/whisperr-spec
+          path: whisperr-spec
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      # Trusted publishing + provenance needs a recent npm (>= 11.5.1).
+      - run: npm install -g npm@latest
+      - run: npm ci
+      - run: npm run build
+      - run: npm run typecheck
+      - run: npm test
+        env:
+          WHISPERR_SPEC_PATH: ${{ github.workspace }}/whisperr-spec/conformance/wire.json
+      - run: npm publish --provenance
