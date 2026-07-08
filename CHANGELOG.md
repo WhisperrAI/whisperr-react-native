@@ -2,6 +2,11 @@
 
 ## 0.2.0
 
+- `uuid()` now prefers `crypto.getRandomValues` when `crypto.randomUUID` is
+  unavailable (the common case on Hermes), so session and anonymous ids come
+  from a CSPRNG on virtually all engines; `Math.random` remains only as a
+  last resort for cryptoless runtimes.
+
 - `setPushToken(token)`: first-class push-token capture. Re-identifies the
   `push` channel for the current user, buffers tokens set before `identify()`,
   no-ops on repeated tokens, and opts the previous token out on rotation —
