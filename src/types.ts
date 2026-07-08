@@ -83,8 +83,10 @@ export interface WhisperrApi {
   /**
    * Captures the device push token (FCM registration token / hex APNs token).
    * With a known user it re-identifies the push channel immediately — a rotated
-   * token opts out the previous one; a repeated token is a no-op. Before
-   * identify() it is buffered and attached to the next identify().
+   * token opts out the previous one; a repeated token is a no-op. The last-sent
+   * (user, token) pair is persisted through the storage adapter, so both hold
+   * across app restarts. Before identify() it is buffered in memory and
+   * attached to the next identify().
    */
   setPushToken(token: string): void;
   track(eventType: string, properties?: Record<string, unknown>, context?: Record<string, unknown>): void;

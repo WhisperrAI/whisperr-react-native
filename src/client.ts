@@ -19,6 +19,7 @@ const SNAKE_CASE = /^[a-z0-9]+(?:_[a-z0-9]+)*$/;
 const ANON_KEY = "whisperr.anon_id";
 const USER_KEY = "whisperr.user_id";
 const OPTOUT_KEY = "whisperr.optout";
+const PUSH_KEY = "whisperr.last_push";
 
 export class WhisperrClient implements WhisperrApi {
   private readonly storage: SafeStorage;
@@ -36,7 +37,12 @@ export class WhisperrClient implements WhisperrApi {
   private anonId = "";
   /** Token captured before identify(); attached to the next identify. */
   private pendingPushToken: string | null = null;
-  /** Last push token delivered, per user — dedups refresh storms, opts out rotations. */
+  /**
+   * Last push token delivered, per user — dedups refresh storms, opts out
+   * rotations. Persisted (PUSH_KEY) alongside the identity so every-launch
+   * getToken() wiring stays a no-op and a post-restart rotation still retires
+   * the stale token.
+   */
   private lastPush: { userId: string; token: string } | null = null;
   private muted: boolean; // opted out / disabled — capture is a no-op
   private closed = false;
@@ -116,8 +122,9 @@ export class WhisperrClient implements WhisperrApi {
       this.pendingPushToken = t; // attached to the next identify()
       return;
     }
+    this.pendingPushToken = null; // the token is handled here, sent or deduped
     const last = this.lastPush && this.lastPush.userId === this.userId ? this.lastPush.token : null;
-    if (last === t) return; // refresh storm — token unchanged
+    if (last === t) return; // refresh storm / every-launch re-send — token unchanged
     const channels: WhisperrChannel[] = [];
     // Rotation: retire the token this client previously registered.
     if (last) channels.push({ type: "push", address: last, optedIn: false });
@@ -128,8 +135,7 @@ export class WhisperrClient implements WhisperrApi {
       channels,
       occurredAt: nowISO(),
     });
-    this.lastPush = { userId: this.userId, token: t };
-    this.pendingPushToken = null;
+    this.setLastPush(this.userId, t);
     void this.flush();
   }
 
@@ -167,6 +173,7 @@ export class WhisperrClient implements WhisperrApi {
     this.lastPush = null;
     this.anonId = `anon_${uuid()}`; // fresh anonymous identity
     void this.storage.remove(USER_KEY);
+    void this.storage.remove(PUSH_KEY);
     void this.storage.set(ANON_KEY, this.anonId);
   }
 
@@ -221,6 +228,24 @@ export class WhisperrClient implements WhisperrApi {
     const user = await this.storage.get(USER_KEY);
     if (user && !this.identityTouched) this.userId = user;
 
+    // Restore the last-sent (user, token) pair so the every-launch getToken()
+    // re-send dedups and a post-restart rotation still opts out the old token.
+    // Skipped when identify()/reset() already ran this launch — their state is
+    // fresher than the persisted copy.
+    if (!this.identityTouched) {
+      const rawPush = await this.storage.get(PUSH_KEY);
+      if (rawPush) {
+        try {
+          const parsed = JSON.parse(rawPush) as { userId?: unknown; token?: unknown };
+          if (typeof parsed.userId === "string" && typeof parsed.token === "string") {
+            this.lastPush = { userId: parsed.userId, token: parsed.token };
+          }
+        } catch {
+          /* corrupt payload — discard */
+        }
+      }
+    }
+
     await this.session.restore();
     await this.queue.restore();
     // Ops captured before we knew who the user is (this launch or a previous
@@ -234,7 +259,13 @@ export class WhisperrClient implements WhisperrApi {
   /** Records the opted-in push channel (if any) that an identify just sent. */
   private rememberPushChannel(userId: string, channels: WhisperrChannel[] | undefined): void {
     const push = channels?.filter((c) => c.type === "push" && c.optedIn !== false).pop();
-    if (push) this.lastPush = { userId, token: push.address };
+    if (push) this.setLastPush(userId, push.address);
+  }
+
+  /** Updates the last-sent (user, token) pair and persists it (write-behind). */
+  private setLastPush(userId: string, token: string): void {
+    this.lastPush = { userId, token };
+    void this.storage.set(PUSH_KEY, JSON.stringify(this.lastPush));
   }
 
   private async drain(): Promise<void> {

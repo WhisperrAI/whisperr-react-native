@@ -117,7 +117,10 @@ whisperr.setPushToken(token);
   new one opted in, so stale tokens don't accumulate — and tokens from the
   user's other devices are never touched.
 - Setting the **same token twice** is a no-op, so it's safe to call on every
-  launch and from `onTokenRefresh`.
+  launch and from `onTokenRefresh`. The last-sent (user, token) pair is
+  persisted through your storage adapter, so the no-op holds **across app
+  restarts** — and a rotation that happens after a relaunch still opts out the
+  stale token.
 - After `reset()` (logout), call `setPushToken` again once the next user logs in.
 
 With `@react-native-firebase/messaging`:

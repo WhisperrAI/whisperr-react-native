@@ -7,6 +7,10 @@
   no-ops on repeated tokens, and opts the previous token out on rotation —
   matching the other Whisperr SDKs and verified against the new
   `whisperr-spec` `conformance/push.json` fixtures.
+- The last-sent (user, token) pair persists through the storage adapter, so
+  the repeated-token no-op holds across app restarts and a rotation after a
+  relaunch still opts out the stale token. `reset()` clears the persisted
+  pair too.
 - `useWhisperrPushToken(token)` React hook: forwards tokens from your messaging
   library (`@react-native-firebase/messaging`, `expo-notifications`, …) as they
   arrive. Still zero dependencies and zero native code.
