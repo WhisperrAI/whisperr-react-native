@@ -280,3 +280,56 @@ describe("lifecycle", () => {
     expect(ev.properties).toEqual({ name: "Paywall", plan: "pro" });
   });
 });
+
+describe("push dedupe marks on delivery, not enqueue", () => {
+  it("re-sends a token whose registration was dropped (4xx) instead of wedging it", async () => {
+    const w = makeClient();
+    w.identify("user_1");
+    await w.flush();
+    captured = [];
+
+    status = 400; // registration rejected — non-retryable
+    w.setPushToken("fcm_tok_a");
+    await w.flush();
+    expect(identifyCalls()).toHaveLength(1); // attempted…
+    expect(errors.some((e) => e.type === "dropped")).toBe(true); // …then dropped
+
+    captured = [];
+    status = 200; // FCM re-delivers the same token on the next launch/refresh
+    w.setPushToken("fcm_tok_a");
+    await w.flush();
+
+    // Not a no-op: the dropped registration cleared the mark, so it re-sends.
+    expect(identifyCalls().map((c) => c.body)).toEqual([
+      {
+        external_user_id: "user_1",
+        channels: [{ channel: "push", address: "fcm_tok_a", opted_in: true }],
+      },
+    ]);
+  });
+
+  it("clears the mark when a registration is evicted on queue overflow", async () => {
+    const w = makeClient({ maxQueueSize: 1 });
+    w.identify("user_1");
+    await w.flush(); // delivered, queue empty
+    captured = [];
+
+    status = 503; // hold everything in the queue
+    w.setPushToken("fcm_tok_a"); // registration enqueued (queue size 1)
+    w.track("feature_used"); // overflow: the registration op is evicted
+    await w.flush();
+    expect(errors.some((e) => e.type === "dropped" && e.message.includes("overflow"))).toBe(true);
+
+    captured = [];
+    status = 200;
+    w.setPushToken("fcm_tok_a"); // same token — must re-send, the mark was cleared
+    await w.flush();
+    expect(
+      identifyCalls().some(
+        (c) =>
+          JSON.stringify(c.body.channels) ===
+          JSON.stringify([{ channel: "push", address: "fcm_tok_a", opted_in: true }]),
+      ),
+    ).toBe(true);
+  });
+});

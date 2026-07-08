@@ -35,13 +35,13 @@ export class DurableQueue {
     return this.ops.length;
   }
 
-  /** Ops dropped to stay within maxSize (0 in the common case). */
-  enqueue(op: QueuedOp): number {
+  /** Ops evicted to stay within maxSize (empty in the common case). */
+  enqueue(op: QueuedOp): QueuedOp[] {
     this.ops.push(op);
     const overflow = Math.max(0, this.ops.length - this.maxSize);
-    if (overflow > 0) this.ops.splice(0, overflow);
+    const evicted = overflow > 0 ? this.ops.splice(0, overflow) : [];
     this.schedulePersist();
-    return overflow;
+    return evicted;
   }
 
   /** Restore ops persisted by a previous launch, ahead of current ones. */

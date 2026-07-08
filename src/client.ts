@@ -48,6 +48,8 @@ export class WhisperrClient implements WhisperrApi {
   private closed = false;
   /** identify()/reset() ran before init resolved — don't adopt the persisted user. */
   private identityTouched = false;
+  /** reset() ran before init resolved — don't restore the persisted push pair. */
+  private pushCleared = false;
   private drainChain: Promise<void> = Promise.resolve();
   private flushTimer: ReturnType<typeof setInterval> | null = null;
   private removeLifecycle: () => void = () => {};
@@ -98,7 +100,13 @@ export class WhisperrClient implements WhisperrApi {
     this.userId = externalUserId;
     void this.storage.set(USER_KEY, externalUserId);
 
-    const channels = buildChannels(params, this.pendingPushToken);
+    // A push token supplied to identify() rotates like setPushToken(): if it
+    // differs from the last token this client sent for this user, opt the old
+    // one out in the same body so it isn't stranded opted-in.
+    const channels = this.withPushRotation(externalUserId, buildChannels(params, this.pendingPushToken));
+    // Mark the last-sent pair BEFORE enqueue so an overflow-evicted registration
+    // clears the mark (mark-on-delivery), never stranding a token opted-out.
+    this.rememberPushChannel(externalUserId, channels);
     this.enqueue({
       kind: "identify",
       externalUserId,
@@ -107,7 +115,6 @@ export class WhisperrClient implements WhisperrApi {
       channels,
       occurredAt: nowISO(),
     });
-    this.rememberPushChannel(externalUserId, channels);
     this.pendingPushToken = null;
     // Anonymous → identified: attribute buffered pre-login events to this user.
     this.queue.backfillIdentity(externalUserId);
@@ -129,13 +136,14 @@ export class WhisperrClient implements WhisperrApi {
     // Rotation: retire the token this client previously registered.
     if (last) channels.push({ type: "push", address: last, optedIn: false });
     channels.push({ type: "push", address: t, optedIn: true });
+    // Mark BEFORE enqueue so an overflow-evicted registration clears the mark.
+    this.setLastPush(this.userId, t);
     this.enqueue({
       kind: "identify",
       externalUserId: this.userId,
       channels,
       occurredAt: nowISO(),
     });
-    this.setLastPush(this.userId, t);
     void this.flush();
   }
 
@@ -168,6 +176,7 @@ export class WhisperrClient implements WhisperrApi {
   reset(): void {
     if (this.closed) return;
     this.identityTouched = true;
+    this.pushCleared = true; // don't let a still-pending init restore the pair
     this.userId = null;
     this.pendingPushToken = null;
     this.lastPush = null;
@@ -230,11 +239,18 @@ export class WhisperrClient implements WhisperrApi {
 
     // Restore the last-sent (user, token) pair so the every-launch getToken()
     // re-send dedups and a post-restart rotation still opts out the old token.
-    // Skipped when identify()/reset() already ran this launch — their state is
-    // fresher than the persisted copy.
-    if (!this.identityTouched) {
+    // This must NOT be gated on identify() having run: apps call identify(user)
+    // in the same launch tick as construction, before init resolves, and
+    // skipping the restore then left lastPush null — so a post-restart rotation
+    // sent no opt-out and same-token dedup was defeated (identify spam every
+    // launch). Restoring after identify() is safe because setPushToken only
+    // opts out / dedups against a pair whose user matches the current user, so
+    // a pair from a prior user is ignored on use. Only reset() invalidates it,
+    // and a fresher pair already set in memory (a setPushToken that raced init)
+    // is never clobbered.
+    if (!this.pushCleared && !this.lastPush) {
       const rawPush = await this.storage.get(PUSH_KEY);
-      if (rawPush) {
+      if (rawPush && !this.lastPush) {
         try {
           const parsed = JSON.parse(rawPush) as { userId?: unknown; token?: unknown };
           if (typeof parsed.userId === "string" && typeof parsed.token === "string") {
@@ -260,6 +276,47 @@ export class WhisperrClient implements WhisperrApi {
   private rememberPushChannel(userId: string, channels: WhisperrChannel[] | undefined): void {
     const push = channels?.filter((c) => c.type === "push" && c.optedIn !== false).pop();
     if (push) this.setLastPush(userId, push.address);
+  }
+
+  /**
+   * If `channels` registers a new opted-in push token that differs from the
+   * last one this client sent for `userId`, prepend an opt-out of the old token
+   * so a token supplied via identify() rotates exactly like setPushToken().
+   */
+  private withPushRotation(
+    userId: string,
+    channels: WhisperrChannel[] | undefined,
+  ): WhisperrChannel[] | undefined {
+    if (!channels) return channels;
+    const newPush = channels.filter((c) => c.type === "push" && c.optedIn !== false).pop();
+    if (!newPush) return channels;
+    const last = this.lastPush && this.lastPush.userId === userId ? this.lastPush.token : null;
+    if (!last || last === newPush.address) return channels;
+    if (channels.some((c) => c.type === "push" && c.address === last)) return channels;
+    return [{ type: "push", address: last, optedIn: false }, ...channels];
+  }
+
+  /**
+   * A dropped (4xx) or overflow-evicted op never reached the server, so the
+   * (user, token) pair it would have registered must not stay marked as
+   * delivered — otherwise a single rejection wedges that token opted-out of
+   * every future setPushToken. Clears lastPush when a discarded op carried the
+   * currently-marked token.
+   */
+  private forgetPushMark(discarded: readonly QueuedOp[]): void {
+    const last = this.lastPush;
+    if (!last) return;
+    for (const op of discarded) {
+      if (op.kind !== "identify" || op.externalUserId !== last.userId) continue;
+      const carried = op.channels?.some(
+        (c) => c.type === "push" && c.optedIn !== false && c.address === last.token,
+      );
+      if (carried) {
+        this.lastPush = null;
+        void this.storage.remove(PUSH_KEY);
+        return;
+      }
+    }
   }
 
   /** Updates the last-sent (user, token) pair and persists it (write-behind). */
@@ -295,6 +352,7 @@ export class WhisperrClient implements WhisperrApi {
         continue;
       }
       if (result === "drop") {
+        this.forgetPushMark(ops.slice(0, count)); // registration rejected — let it re-send
         this.queue.removeFront(count);
         retries = 0;
         this.emit({ type: "dropped", message: `dropped ${count} event(s) — rejected by server` });
@@ -314,9 +372,10 @@ export class WhisperrClient implements WhisperrApi {
   }
 
   private enqueue(op: QueuedOp): void {
-    const dropped = this.queue.enqueue(op);
-    if (dropped > 0) {
-      this.emit({ type: "dropped", message: `queue overflow — dropped ${dropped} oldest event(s)` });
+    const evicted = this.queue.enqueue(op);
+    if (evicted.length > 0) {
+      this.forgetPushMark(evicted); // an evicted registration never shipped
+      this.emit({ type: "dropped", message: `queue overflow — dropped ${evicted.length} oldest event(s)` });
     }
   }
 
