@@ -1,4 +1,4 @@
-import { createContext, createElement, useContext, useRef, type ReactElement, type ReactNode } from "react";
+import { createContext, createElement, useContext, useEffect, useRef, type ReactElement, type ReactNode } from "react";
 import { WhisperrClient } from "./client.js";
 import type { WhisperrApi, WhisperrOptions } from "./types.js";
 
@@ -41,4 +41,26 @@ export function useWhisperr(): WhisperrApi {
     throw new Error("useWhisperr must be used within a <WhisperrProvider>.");
   }
   return value;
+}
+
+/**
+ * Forwards a push token from your messaging library to Whisperr whenever it
+ * changes. Pass whatever your push setup produces — an FCM registration token
+ * (`@react-native-firebase/messaging`) or an Expo/device token
+ * (`expo-notifications`); null/undefined while the token is still loading.
+ *
+ * ```tsx
+ * const [token, setToken] = useState<string | null>(null);
+ * useEffect(() => {
+ *   messaging().getToken().then(setToken);
+ *   return messaging().onTokenRefresh(setToken);
+ * }, []);
+ * useWhisperrPushToken(token);
+ * ```
+ */
+export function useWhisperrPushToken(token: string | null | undefined): void {
+  const whisperr = useWhisperr();
+  useEffect(() => {
+    if (token) whisperr.setPushToken(token);
+  }, [whisperr, token]);
 }

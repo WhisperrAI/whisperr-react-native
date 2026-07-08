@@ -80,6 +80,15 @@ export interface WhisperrError {
 /** The public client surface. */
 export interface WhisperrApi {
   identify(externalUserId: string, params?: IdentifyParams): void;
+  /**
+   * Captures the device push token (FCM registration token / hex APNs token).
+   * With a known user it re-identifies the push channel immediately — a rotated
+   * token opts out the previous one; a repeated token is a no-op. The last-sent
+   * (user, token) pair is persisted through the storage adapter, so both hold
+   * across app restarts. Before identify() it is buffered in memory and
+   * attached to the next identify().
+   */
+  setPushToken(token: string): void;
   track(eventType: string, properties?: Record<string, unknown>, context?: Record<string, unknown>): void;
   screen(name?: string, properties?: Record<string, unknown>): void;
   flush(): Promise<void>;

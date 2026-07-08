@@ -2,13 +2,32 @@
 
 import type { SafeStorage } from "./storage.js";
 
-export const LIB_VERSION = "0.1.1";
+export const LIB_VERSION = "0.2.0";
 
-/** RFC4122-ish v4 id; uses crypto when available, falls back gracefully. */
+/**
+ * RFC4122 v4 id. Prefers crypto.randomUUID, then crypto.getRandomValues
+ * (present on modern Hermes and on JSC/Expo with the usual polyfills); only
+ * engines with no crypto at all hit the insecure last resort.
+ */
 export function uuid(): string {
-  const c = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
+  const c = (
+    globalThis as {
+      crypto?: {
+        randomUUID?: () => string;
+        getRandomValues?: (array: Uint8Array) => Uint8Array;
+      };
+    }
+  ).crypto;
   if (c && typeof c.randomUUID === "function") return c.randomUUID();
-  // Fallback (non-crypto): fine for a client message/anonymous id.
+  if (c && typeof c.getRandomValues === "function") {
+    const bytes = c.getRandomValues(new Uint8Array(16));
+    bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x40; // version 4
+    bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80; // variant 10xx
+    const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
+  // Last resort (non-crypto): ids stay unique enough for attribution, but are
+  // predictable — acceptable because they are identifiers, never secrets.
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (ch) => {
     const r = (Math.random() * 16) | 0;
     const v = ch === "x" ? r : (r & 0x3) | 0x8;

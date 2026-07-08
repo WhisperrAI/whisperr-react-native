@@ -101,6 +101,59 @@ whisperr.identify("user_123", {
 });
 ```
 
+## Push notifications
+
+The SDK never bundles a push library — hand it the token your own messaging
+setup produces and Whisperr keeps the `push` channel current:
+
+```ts
+whisperr.setPushToken(token);
+```
+
+- Called **after login**, it re-identifies the push channel immediately.
+- Called **before login**, the token is buffered and attached to the next
+  `identify()`.
+- **Token rotation** is handled: the previously sent token is opted out and the
+  new one opted in, so stale tokens don't accumulate — and tokens from the
+  user's other devices are never touched.
+- Setting the **same token twice** is a no-op, so it's safe to call on every
+  launch and from `onTokenRefresh`. The last-sent (user, token) pair is
+  persisted through your storage adapter, so the no-op holds **across app
+  restarts** — and a rotation that happens after a relaunch still opts out the
+  stale token.
+- After `reset()` (logout), call `setPushToken` again once the next user logs in.
+
+With `@react-native-firebase/messaging`:
+
+```tsx
+import messaging from "@react-native-firebase/messaging";
+import { useWhisperrPushToken } from "@whisperr/react-native";
+
+function PushBridge() {
+  const [token, setToken] = useState<string | null>(null);
+  useEffect(() => {
+    messaging().getToken().then(setToken);
+    return messaging().onTokenRefresh(setToken);
+  }, []);
+  useWhisperrPushToken(token); // forwards to whisperr.setPushToken()
+  return null;
+}
+```
+
+With `expo-notifications`:
+
+```tsx
+import * as Notifications from "expo-notifications";
+
+const [token, setToken] = useState<string | null>(null);
+useEffect(() => {
+  Notifications.getDevicePushTokenAsync().then((t) => setToken(t.data));
+  const sub = Notifications.addPushTokenListener((t) => setToken(t.data));
+  return () => sub.remove();
+}, []);
+useWhisperrPushToken(token);
+```
+
 ## Delivery
 
 - Events send to `POST /v1/events/batch`; identity to `POST /v1/identify`,

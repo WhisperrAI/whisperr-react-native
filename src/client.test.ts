@@ -244,6 +244,31 @@ describe("lifecycle", () => {
     expect(batchCalls()[0]!.body.events[0].external_user_id).toBe("user_2");
   });
 
+  it("reset() clears the persisted last-sent push token so the next login re-sends it", async () => {
+    const storage = new MemoryStorage();
+    const first = makeClient({ storage });
+    first.identify("user_1");
+    first.setPushToken("fcm_tok_a");
+    await first.flush();
+    first.reset(); // logout — must also clear the persisted (user, token) pair
+    await first.close();
+
+    captured = [];
+    const second = makeClient({ storage });
+    await second.flush(); // let init settle (nothing persisted to restore)
+    second.identify("user_1");
+    second.setPushToken("fcm_tok_a"); // same user+token — must SEND, not dedupe
+    await second.flush();
+
+    expect(identifyCalls().map((c) => c.body)).toEqual([
+      { external_user_id: "user_1" },
+      {
+        external_user_id: "user_1",
+        channels: [{ channel: "push", address: "fcm_tok_a", opted_in: true }],
+      },
+    ]);
+  });
+
   it("screen() tracks screen_viewed with the screen name", async () => {
     const w = makeClient();
     w.identify("user_1");

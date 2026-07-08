@@ -4,7 +4,7 @@ import type { WhisperrApi, WhisperrOptions } from "./types.js";
 export * from "./types.js";
 export { WhisperrClient };
 export { MemoryStorage } from "./storage.js";
-export { WhisperrProvider, useWhisperr, type WhisperrProviderProps } from "./react.js";
+export { WhisperrProvider, useWhisperr, useWhisperrPushToken, type WhisperrProviderProps } from "./react.js";
 
 let singleton: WhisperrClient | null = null;
 

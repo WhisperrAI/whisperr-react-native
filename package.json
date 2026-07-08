@@ -1,6 +1,6 @@
 {
   "name": "@whisperr/react-native",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Whisperr React Native SDK — reliable, Expo-friendly churn-signal event tracking with zero native code.",
   "license": "MIT",
   "type": "module",
