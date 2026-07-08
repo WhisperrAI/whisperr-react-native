@@ -34,6 +34,10 @@ export class WhisperrClient implements WhisperrApi {
 
   private userId: string | null = null;
   private anonId = "";
+  /** Token captured before identify(); attached to the next identify. */
+  private pendingPushToken: string | null = null;
+  /** Last push token delivered, per user — dedups refresh storms, opts out rotations. */
+  private lastPush: { userId: string; token: string } | null = null;
   private muted: boolean; // opted out / disabled — capture is a no-op
   private closed = false;
   /** identify()/reset() ran before init resolved — don't adopt the persisted user. */
@@ -88,16 +92,44 @@ export class WhisperrClient implements WhisperrApi {
     this.userId = externalUserId;
     void this.storage.set(USER_KEY, externalUserId);
 
+    const channels = buildChannels(params, this.pendingPushToken);
     this.enqueue({
       kind: "identify",
       externalUserId,
       traits: params.traits,
       preferredChannel: params.preferredChannel,
-      channels: buildChannels(params),
+      channels,
       occurredAt: nowISO(),
     });
+    this.rememberPushChannel(externalUserId, channels);
+    this.pendingPushToken = null;
     // Anonymous → identified: attribute buffered pre-login events to this user.
     this.queue.backfillIdentity(externalUserId);
+    void this.flush();
+  }
+
+  setPushToken(token: string): void {
+    if (this.muted || this.closed || !token) return;
+    const t = token.trim();
+    if (!t) return;
+    if (!this.userId) {
+      this.pendingPushToken = t; // attached to the next identify()
+      return;
+    }
+    const last = this.lastPush && this.lastPush.userId === this.userId ? this.lastPush.token : null;
+    if (last === t) return; // refresh storm — token unchanged
+    const channels: WhisperrChannel[] = [];
+    // Rotation: retire the token this client previously registered.
+    if (last) channels.push({ type: "push", address: last, optedIn: false });
+    channels.push({ type: "push", address: t, optedIn: true });
+    this.enqueue({
+      kind: "identify",
+      externalUserId: this.userId,
+      channels,
+      occurredAt: nowISO(),
+    });
+    this.lastPush = { userId: this.userId, token: t };
+    this.pendingPushToken = null;
     void this.flush();
   }
 
@@ -131,6 +163,8 @@ export class WhisperrClient implements WhisperrApi {
     if (this.closed) return;
     this.identityTouched = true;
     this.userId = null;
+    this.pendingPushToken = null;
+    this.lastPush = null;
     this.anonId = `anon_${uuid()}`; // fresh anonymous identity
     void this.storage.remove(USER_KEY);
     void this.storage.set(ANON_KEY, this.anonId);
@@ -192,6 +226,15 @@ export class WhisperrClient implements WhisperrApi {
     // Ops captured before we knew who the user is (this launch or a previous
     // one that never identified) now attribute to the restored identity.
     if (this.userId) this.queue.backfillIdentity(this.userId);
+    // A token captured before the persisted identity was restored (common when
+    // the messaging lib fires at startup) now attributes to the restored user.
+    if (this.userId && this.pendingPushToken) this.setPushToken(this.pendingPushToken);
+  }
+
+  /** Records the opted-in push channel (if any) that an identify just sent. */
+  private rememberPushChannel(userId: string, channels: WhisperrChannel[] | undefined): void {
+    const push = channels?.filter((c) => c.type === "push" && c.optedIn !== false).pop();
+    if (push) this.lastPush = { userId, token: push.address };
   }
 
   private async drain(): Promise<void> {
@@ -301,12 +344,20 @@ export class WhisperrClient implements WhisperrApi {
   }
 }
 
-function buildChannels(params: IdentifyParams): WhisperrChannel[] | undefined {
-  if (params.channels && params.channels.length) return params.channels;
+function buildChannels(params: IdentifyParams, pendingPushToken: string | null): WhisperrChannel[] | undefined {
   const out: WhisperrChannel[] = [];
-  if (params.email) out.push({ type: "email", address: params.email, optedIn: true });
-  if (params.phone) out.push({ type: "sms", address: params.phone, optedIn: true });
-  if (params.pushToken) out.push({ type: "push", address: params.pushToken, optedIn: true });
+  if (params.channels && params.channels.length) {
+    out.push(...params.channels);
+  } else {
+    if (params.email) out.push({ type: "email", address: params.email, optedIn: true });
+    if (params.phone) out.push({ type: "sms", address: params.phone, optedIn: true });
+    if (params.pushToken) out.push({ type: "push", address: params.pushToken, optedIn: true });
+  }
+  // A token buffered by setPushToken() rides along unless the caller supplied
+  // its own push channel.
+  if (pendingPushToken && !out.some((c) => c.type === "push")) {
+    out.push({ type: "push", address: pendingPushToken, optedIn: true });
+  }
   return out.length ? out : undefined;
 }
 
