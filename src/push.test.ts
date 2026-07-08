@@ -13,7 +13,8 @@ const realFetch = globalThis.fetch.bind(globalThis);
 type Step =
   | { identify: { externalUserId: string; [k: string]: unknown } }
   | { setPushToken: string }
-  | { restart: boolean };
+  | { restart: boolean }
+  | { reset: boolean };
 
 interface PushCase {
   name: string;
@@ -66,15 +67,23 @@ describe("push-token conformance (whisperr-spec)", () => {
         if ("identify" in step) {
           const { externalUserId, ...params } = step.identify;
           w.identify(externalUserId, params);
+          await w.flush();
         } else if ("setPushToken" in step) {
           w.setPushToken(step.setPushToken);
+          await w.flush();
+        } else if ("reset" in step) {
+          w.reset();
+          await w.flush();
         } else {
           // restart: tear down the client, construct a fresh one on the same
-          // storage — persisted identity and last-sent token must be restored.
+          // storage. Do NOT drain init here — real apps call identify() /
+          // setPushToken() in the launch tick, before the async restore
+          // resolves. The next step runs against the still-initializing client
+          // (its own flush() forces restore); this is what exposes an SDK that
+          // skips restoring the persisted push pair once identify() has run.
           await w.close();
           w = makeClient();
         }
-        await w.flush(); // deliver each step before the next, so order is pinned
       }
       await w.close();
 

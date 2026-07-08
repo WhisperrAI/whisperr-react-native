@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.2.1
+
+- Fix: the persisted last-sent (user, token) push pair is now restored even
+  when `identify(user)` runs in the launch tick (the common case). Previously
+  the restore was skipped once `identify()`/`reset()` had run, so `lastPush`
+  was null every launch — a post-restart rotation sent **no opt-out** for the
+  old token (stale tokens accumulated opted-in) and the same-token dedup was
+  defeated (identify spam on every launch). Restoring after `identify()` is
+  safe: `setPushToken` only opts out / dedups against a pair whose user matches
+  the current user. Only `reset()` invalidates the pair now.
+- Fix: the dedup pair is a mark of what was **delivered**. A registration whose
+  request is dropped (non-retryable `4xx`) or evicted on queue overflow now
+  clears the pair, so the token re-registers on the next `setPushToken` instead
+  of being wedged opted-out forever by a single rejection.
+- `identify(pushToken:)` now rotates like `setPushToken`: a push token passed
+  to `identify()` that differs from the last one sent opts the previous token
+  out in the same body, instead of stranding it opted-in.
+- Verified against the hardened `whisperr-spec` `conformance/push.json`
+  (restart-then-reidentify rotation/dedup, `reset`, empty-token, and
+  `identify(pushToken:)` cases).
+
 ## 0.2.0
 
 - `setPushToken(token)`: first-class push-token capture. Re-identifies the
