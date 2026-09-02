@@ -1,3 +1,4 @@
+import { deviceTraits } from "./device.js";
 import { currentOS, onAppBackground } from "./lifecycle.js";
 import { DurableQueue } from "./queue.js";
 import { LIB_VERSION, nowISO, Session, uuid } from "./runtime.js";
@@ -110,7 +111,7 @@ export class WhisperrClient implements WhisperrApi {
     this.enqueue({
       kind: "identify",
       externalUserId,
-      traits: params.traits,
+      traits: withDeviceTraits(params.traits),
       preferredChannel: params.preferredChannel,
       channels,
       occurredAt: nowISO(),
@@ -432,6 +433,23 @@ export class WhisperrClient implements WhisperrApi {
       console.warn(`[whisperr] ${message}`);
     }
   }
+}
+
+/** Keys the engine reads for the user's zone; any of them supplied means "don't default `timezone`". */
+const TIMEZONE_KEYS = ["timezone", "time_zone", "tz"];
+
+/**
+ * Fills the reserved `timezone` / `locale` traits from the device unless the
+ * caller supplied them — caller values always win, and a key the runtime
+ * cannot provide is simply absent (see whisperr-spec → Reserved trait keys).
+ * Only full identify() calls get defaults; setPushToken()'s partial identify
+ * stays traits-free by contract.
+ */
+function withDeviceTraits(traits: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  const defaults: Record<string, unknown> = deviceTraits();
+  if (traits && TIMEZONE_KEYS.some((k) => k in traits)) delete defaults.timezone;
+  const merged = { ...defaults, ...traits };
+  return Object.keys(merged).length ? merged : undefined;
 }
 
 function buildChannels(params: IdentifyParams, pendingPushToken: string | null): WhisperrChannel[] | undefined {

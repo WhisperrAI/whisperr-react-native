@@ -101,6 +101,8 @@ whisperr.identify("user_123", {
 });
 ```
 
+`identify()` also sends `traits.timezone` (IANA, via `Intl`) and `traits.locale` (BCP 47, via `Intl` or `I18nManager`) by default when the runtime can provide them — pass your own `traits.timezone` / `traits.locale` to override, and nothing is sent for a value the device can't supply.
+
 ## Push notifications
 
 The SDK never bundles a push library — hand it the token your own messaging

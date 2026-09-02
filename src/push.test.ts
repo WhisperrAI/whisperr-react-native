@@ -2,6 +2,15 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WhisperrClient } from "./client.js";
+
+// Device-derived trait defaults (timezone / locale) are environment-dependent,
+// so the spec fixtures never pin them (SPEC.md → Reserved trait keys): run with
+// them disabled so every identify body is exactly what the scenario supplied.
+// device.test.ts covers the defaults themselves.
+vi.mock("./device.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./device.js")>()),
+  deviceTraits: () => ({}),
+}));
 import { MemoryStorage } from "./storage.js";
 
 const SPEC_URL =

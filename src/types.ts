@@ -12,7 +12,11 @@ export interface WhisperrChannel {
 }
 
 export interface IdentifyParams {
-  /** Arbitrary traits (plan, signup_date, …). Merged server-side. */
+  /**
+   * Arbitrary traits (plan, signup_date, …). Merged server-side. The reserved
+   * keys `timezone` (IANA name) and `locale` (BCP 47) are filled in from the
+   * device unless you supply them — your values always win.
+   */
   traits?: Record<string, unknown>;
   /** Convenience: expands to an opted-in email channel. */
   email?: string;

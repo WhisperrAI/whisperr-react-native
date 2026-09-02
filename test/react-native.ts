@@ -25,3 +25,16 @@ export function __setAppState(state: AppStateStatus): void {
 export function __listenerCount(): number {
   return listeners.size;
 }
+
+let localeIdentifier: string | undefined;
+
+export const I18nManager = {
+  getConstants() {
+    return { isRTL: false, doLeftAndRightSwapInRTL: true, localeIdentifier };
+  },
+};
+
+/** Test hook: what I18nManager reports as the device locale (undefined = nothing). */
+export function __setLocaleIdentifier(id: string | undefined): void {
+  localeIdentifier = id;
+}

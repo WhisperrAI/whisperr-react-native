@@ -3,7 +3,7 @@
  * it and so a defensive try/catch shields exotic runtimes (headless JS tasks,
  * Jest without a preset) where AppState may be unavailable.
  */
-import { AppState, Platform, type AppStateStatus } from "react-native";
+import { AppState, I18nManager, Platform, type AppStateStatus } from "react-native";
 
 export function currentOS(): string | undefined {
   try {
@@ -23,5 +23,22 @@ export function onAppBackground(callback: () => void): () => void {
     return () => subscription?.remove?.();
   } catch {
     return () => {};
+  }
+}
+
+/**
+ * The device locale as React Native's own I18nManager reports it (a Java/Cocoa
+ * identifier such as "de_DE", "zh_CN_#Hans", or "en_US@calendar=gregorian") —
+ * no native module, no dependency. Undefined when the host doesn't expose it.
+ */
+export function platformLocaleIdentifier(): string | undefined {
+  try {
+    const manager = I18nManager as unknown as {
+      getConstants?: () => { localeIdentifier?: string | null } | undefined;
+    };
+    const id = manager.getConstants?.()?.localeIdentifier;
+    return typeof id === "string" && id.length > 0 ? id : undefined;
+  } catch {
+    return undefined;
   }
 }
