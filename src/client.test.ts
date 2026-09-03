@@ -4,6 +4,15 @@ import { WhisperrClient } from "./client.js";
 import { MemoryStorage } from "./storage.js";
 import type { WhisperrError, WhisperrOptions } from "./types.js";
 
+// Device-derived trait defaults (timezone / locale) are environment-dependent,
+// so the spec fixtures never pin them (SPEC.md → Reserved trait keys): run with
+// them disabled so every identify body is exactly what the scenario supplied.
+// device.test.ts covers the defaults themselves.
+vi.mock("./device.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./device.js")>()),
+  deviceTraits: () => ({}),
+}));
+
 let captured: Array<{ path: string; body: any }> = [];
 let status = 200;
 let errors: WhisperrError[] = [];

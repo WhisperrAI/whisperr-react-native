@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- `identify()` now fills the reserved traits `timezone` (IANA name, from
+  `Intl.DateTimeFormat().resolvedOptions()`) and `locale` (BCP 47, from `Intl`
+  or React Native's `I18nManager`) by default, so the engine evaluates quiet
+  hours in the user's zone instead of UTC and picks the message language.
+  Caller-supplied values always win; a value the runtime cannot provide is
+  omitted. `setPushToken()`'s partial identify stays traits-free.
+
 ## 0.2.1
 
 - Fix: the persisted last-sent (user, token) push pair is now restored even
