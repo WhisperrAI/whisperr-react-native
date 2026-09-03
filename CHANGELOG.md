@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.2
 
 - `identify()` now fills the reserved traits `timezone` (IANA name, from
   `Intl.DateTimeFormat().resolvedOptions()`) and `locale` (BCP 47, from `Intl`
