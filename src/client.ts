@@ -13,18 +13,29 @@ import {
 } from "./autocapture.js";
 import { deviceTraits } from "./device.js";
 import { currentAppState, currentOS, onAppStateChange, type AppStateStatus } from "./lifecycle.js";
+import {
+  isPushPermissionStatus,
+  normalizePushToken,
+  permissionAllowsPush,
+  pushChannel,
+  pushMeta,
+  type PushRegistration,
+} from "./push.js";
 import { DurableQueue } from "./queue.js";
 import { LIB_VERSION, nowISO, Session, uuid } from "./runtime.js";
 import { MemoryStorage, SafeStorage } from "./storage.js";
 import { Transport, type SendOutcome } from "./transport.js";
 import type {
   IdentifyParams,
+  PushPermissionStatus,
+  PushTokenInput,
   QueuedOp,
   TrackOp,
   WhisperrApi,
   WhisperrChannel,
   WhisperrError,
   WhisperrOptions,
+  WhisperrPushOpen,
 } from "./types.js";
 
 const DEFAULT_BASE = "https://api.whisperr.net";
@@ -40,6 +51,10 @@ const ANON_USED_KEY = "whisperr.anon_used";
 const APP_VERSION_KEY = "whisperr.app_version";
 /** whisperr_message_ids already reported as push_opened (most recent last). */
 const PUSH_OPENED_KEY = "whisperr.push_opened";
+/** The last notification permission reported, and the user it was sent for. */
+const PERMISSION_KEY = "whisperr.push_permission";
+/** The trait that carries the notification permission. */
+const PERMISSION_TRAIT = "push_permission";
 const MAX_REMEMBERED_PUSH_OPENS = 100;
 /**
  * Every key an SDK version before lifecycle events (0.2.x) could have
@@ -78,15 +93,22 @@ export class WhisperrClient implements WhisperrApi {
   private hadPriorState = false;
   private readonly priorState: Promise<boolean>;
   private initialized = false;
-  /** Token captured before identify(); attached to the next identify. */
-  private pendingPushToken: string | null = null;
+  /**
+   * Token captured before identify() (attached to the next identify), or held
+   * back while the reported permission is `denied` (sent when it comes back).
+   */
+  private pendingPushToken: PushRegistration | null = null;
   /**
    * Last push token delivered, per user — dedups refresh storms, opts out
    * rotations. Persisted (PUSH_KEY) alongside the identity so every-launch
    * getToken() wiring stays a no-op and a post-restart rotation still retires
    * the stale token.
    */
-  private lastPush: { userId: string; token: string } | null = null;
+  private lastPush: { userId: string; token: string; meta?: string } | null = null;
+  /** The notification permission last reported through setPushPermission(). */
+  private permission: PushPermissionStatus | null = null;
+  /** The user the current permission status was sent for (null: not sent yet). */
+  private permissionSentFor: string | null = null;
   private muted: boolean; // opted out / disabled — capture is a no-op
   private closed = false;
   /** identify()/reset() ran before init resolved — don't adopt the persisted user. */
@@ -178,7 +200,9 @@ export class WhisperrClient implements WhisperrApi {
     // A push token supplied to identify() rotates like setPushToken(): if it
     // differs from the last token this client sent for this user, opt the old
     // one out in the same body so it isn't stranded opted-in.
-    const channels = this.withPushRotation(externalUserId, buildChannels(params, this.pendingPushToken));
+    // A token held back while notifications are denied stays held back.
+    const pending = this.permission === "denied" ? null : this.pendingPushToken;
+    const channels = this.withPushRotation(externalUserId, buildChannels(params, pending));
     // Mark the last-sent pair BEFORE enqueue so an overflow-evicted registration
     // clears the mark (mark-on-delivery), never stranding a token opted-out.
     this.rememberPushChannel(externalUserId, channels);
@@ -199,41 +223,33 @@ export class WhisperrClient implements WhisperrApi {
       externalUserId,
       ...(anonymousId ? { anonymousId } : {}),
       ...(resolveAnonymous ? { resolveAnonymous } : {}),
-      traits: withDeviceTraits(params.traits),
+      traits: this.withPermissionTrait(externalUserId, withDeviceTraits(params.traits)),
       preferredChannel: params.preferredChannel,
       channels,
       occurredAt: nowISO(),
     });
-    this.pendingPushToken = null;
+    if (pending) this.pendingPushToken = null;
     // Pre-login events still queued go out under this user directly.
     this.queue.backfillIdentity(externalUserId, this.anonId || undefined);
     void this.flush();
   }
 
-  setPushToken(token: string): void {
-    if (this.muted || this.closed || !token) return;
-    const t = token.trim();
-    if (!t) return;
-    if (!this.userId) {
-      this.pendingPushToken = t; // attached to the next identify()
+  setPushToken(token: PushTokenInput): void {
+    if (this.muted || this.closed) return;
+    const reg = normalizePushToken(token);
+    if (reg) this.registerPushToken(reg);
+  }
+
+  setPushPermission(status: PushPermissionStatus): void {
+    if (this.muted || this.closed) return;
+    if (!isPushPermissionStatus(status)) {
+      this.log(`setPushPermission(): unknown status "${String(status)}" — ignored`);
       return;
     }
-    this.pendingPushToken = null; // the token is handled here, sent or deduped
-    const last = this.lastPush && this.lastPush.userId === this.userId ? this.lastPush.token : null;
-    if (last === t) return; // refresh storm / every-launch re-send — token unchanged
-    const channels: WhisperrChannel[] = [];
-    // Rotation: retire the token this client previously registered.
-    if (last) channels.push({ type: "push", address: last, optedIn: false });
-    channels.push({ type: "push", address: t, optedIn: true });
-    // Mark BEFORE enqueue so an overflow-evicted registration clears the mark.
-    this.setLastPush(this.userId, t);
-    this.enqueue({
-      kind: "identify",
-      externalUserId: this.userId,
-      channels,
-      occurredAt: nowISO(),
-    });
-    void this.flush();
+    // Decide after init: the persisted status (and the user it was sent for)
+    // makes a repeated report a no-op across restarts.
+    if (this.initialized) this.applyPermission(status);
+    else void this.initPromise.then(() => this.applyPermission(status));
   }
 
   track(eventType: string, properties?: Record<string, unknown>, context?: Record<string, unknown>): void {
@@ -257,25 +273,30 @@ export class WhisperrClient implements WhisperrApi {
     this.track(SCREEN_VIEWED, { ...properties, screen_name: screenName });
   }
 
-  trackPushOpened(data: unknown): void {
-    if (this.muted || this.closed) return;
+  trackPushOpened(data: unknown): WhisperrPushOpen | null {
     const payload = extractPushOpened(data);
     if (!payload) {
       this.log("trackPushOpened(): no whisperr_message_id in the payload — not a Whisperr push, ignored");
-      return;
+      return null;
     }
+    // The app routes on the result even when nothing is sent.
+    if (this.muted || this.closed) return payload;
     const { messageId, deepLink } = payload;
     // Cold start: getLastNotificationResponseAsync / getInitialNotification and
     // the response listener can both report the same tap — and the cold-start
     // getter keeps answering it on later launches. Report each message once.
-    if (this.openedThisLaunch.includes(messageId)) return;
+    if (this.openedThisLaunch.includes(messageId)) return payload;
     this.openedThisLaunch.push(messageId);
     const occurredAt = nowISO();
     void this.initPromise.then(() => {
       if (this.muted || this.closed || this.persistedOpened.has(messageId)) return;
       this.enqueueTrack(
         PUSH_OPENED,
-        deepLink ? { whisperr_message_id: messageId, deep_link: deepLink } : { whisperr_message_id: messageId },
+        {
+          ...automaticProperties(this.appInfo),
+          whisperr_message_id: messageId,
+          ...(deepLink ? { deep_link: deepLink } : {}),
+        },
         undefined,
         occurredAt,
       );
@@ -288,6 +309,7 @@ export class WhisperrClient implements WhisperrApi {
       void this.queue.settle().then(() => this.storage.set(PUSH_OPENED_KEY, JSON.stringify(remembered)));
       void this.flush();
     });
+    return payload;
   }
 
   reset(): void {
@@ -305,6 +327,8 @@ export class WhisperrClient implements WhisperrApi {
     this.userId = null;
     this.pendingPushToken = null;
     this.lastPush = null;
+    // The device permission stays; the next user gets it with their identify.
+    this.setPermissionState(this.permission, null);
     this.anonId = uuid(); // fresh anonymous identity (a UUID v4, per the spec)
     this.setAnonUsed(false);
     void this.storage.remove(USER_KEY);
@@ -382,13 +406,32 @@ export class WhisperrClient implements WhisperrApi {
       const rawPush = await this.storage.get(PUSH_KEY);
       if (rawPush && !this.lastPush) {
         try {
-          const parsed = JSON.parse(rawPush) as { userId?: unknown; token?: unknown };
+          const parsed = JSON.parse(rawPush) as { userId?: unknown; token?: unknown; meta?: unknown };
           if (typeof parsed.userId === "string" && typeof parsed.token === "string") {
-            this.lastPush = { userId: parsed.userId, token: parsed.token };
+            this.lastPush = {
+              userId: parsed.userId,
+              token: parsed.token,
+              ...(typeof parsed.meta === "string" && parsed.meta ? { meta: parsed.meta } : {}),
+            };
           }
         } catch {
           /* corrupt payload — discard */
         }
+      }
+    }
+
+    // The permission is reported through setPushPermission(), which waits for
+    // init, so the stored value is always the latest one at this point.
+    const rawPermission = await this.storage.get(PERMISSION_KEY);
+    if (rawPermission) {
+      try {
+        const parsed = JSON.parse(rawPermission) as { status?: unknown; sentFor?: unknown };
+        if (isPushPermissionStatus(parsed.status) && this.permission === null) {
+          this.permission = parsed.status;
+          this.permissionSentFor = typeof parsed.sentFor === "string" ? parsed.sentFor : null;
+        }
+      } catch {
+        /* corrupt payload — discard */
       }
     }
 
@@ -428,7 +471,100 @@ export class WhisperrClient implements WhisperrApi {
     this.initialized = true;
     // A token captured before the persisted identity was restored (common when
     // the messaging lib fires at startup) now attributes to the restored user.
-    if (this.userId && this.pendingPushToken) this.setPushToken(this.pendingPushToken);
+    if (this.userId && this.pendingPushToken) this.registerPushToken(this.pendingPushToken);
+  }
+
+  // ---- push token + permission ----
+
+  private registerPushToken(reg: PushRegistration): void {
+    // Held, not sent: before init (the restored last-sent pair and permission
+    // decide it then), before we know the user (the next identify() takes it),
+    // and while notifications are off (the next allowed report sends it).
+    if (!this.initialized || !this.userId || this.permission === "denied") {
+      this.pendingPushToken = reg;
+      return;
+    }
+    this.pendingPushToken = null; // the token is handled here, sent or deduped
+    const last = this.lastPush && this.lastPush.userId === this.userId ? this.lastPush : null;
+    const meta = pushMeta(reg);
+    // Refresh storm / every-launch re-send: same token, nothing new to say.
+    // A bare token never downgrades a registration that carried metadata.
+    if (last && last.token === reg.token && (meta === "" || meta === (last.meta ?? ""))) return;
+    const channels: WhisperrChannel[] = [];
+    // Rotation: retire the token this client previously registered.
+    if (last && last.token !== reg.token) channels.push({ type: "push", address: last.token, optedIn: false });
+    channels.push(pushChannel(reg, true));
+    // Mark BEFORE enqueue so an overflow-evicted registration clears the mark.
+    this.setLastPush(this.userId, reg.token, meta || last?.meta);
+    this.enqueue({
+      kind: "identify",
+      externalUserId: this.userId,
+      channels,
+      occurredAt: nowISO(),
+    });
+    void this.flush();
+  }
+
+  private applyPermission(status: PushPermissionStatus): void {
+    if (this.muted || this.closed) return;
+    const changed = this.permission !== status;
+    const userId = this.userId;
+    if (!userId) {
+      // Sent with the next identify().
+      if (changed) this.setPermissionState(status, null);
+      return;
+    }
+    if (!changed && this.permissionSentFor === userId) return; // every-launch / every-foreground report
+    const channels: WhisperrChannel[] = [];
+    if (status === "denied") {
+      // Stop push to this device: opt the registered token out, and hold it so
+      // it registers again as soon as the permission comes back.
+      const last = this.lastPush && this.lastPush.userId === userId ? this.lastPush : null;
+      if (last) {
+        channels.push({ type: "push", address: last.token, optedIn: false });
+        if (!this.pendingPushToken) this.pendingPushToken = registrationFromMeta(last.token, last.meta);
+        this.lastPush = null;
+        void this.storage.remove(PUSH_KEY);
+      }
+    } else if (permissionAllowsPush(status) && this.pendingPushToken) {
+      const reg = this.pendingPushToken;
+      this.pendingPushToken = null;
+      const last = this.lastPush && this.lastPush.userId === userId ? this.lastPush : null;
+      if (last && last.token !== reg.token) channels.push({ type: "push", address: last.token, optedIn: false });
+      if (!last || last.token !== reg.token) {
+        channels.push(pushChannel(reg, true));
+        this.setLastPush(userId, reg.token, pushMeta(reg) || undefined);
+      }
+    }
+    // Mark BEFORE enqueue so a dropped or evicted report clears the mark.
+    this.setPermissionState(status, userId);
+    this.enqueue({
+      kind: "identify",
+      externalUserId: userId,
+      traits: { [PERMISSION_TRAIT]: status },
+      ...(channels.length ? { channels } : {}),
+      occurredAt: nowISO(),
+    });
+    void this.flush();
+  }
+
+  /** Adds `push_permission` to a full identify when this user has not received the current status yet. */
+  private withPermissionTrait(
+    userId: string,
+    traits: Record<string, unknown> | undefined,
+  ): Record<string, unknown> | undefined {
+    if (!this.initialized || this.permission === null) return traits;
+    if (traits && PERMISSION_TRAIT in traits) return traits; // the caller's value wins
+    if (this.permissionSentFor === userId) return traits;
+    this.setPermissionState(this.permission, userId);
+    return { ...traits, [PERMISSION_TRAIT]: this.permission };
+  }
+
+  private setPermissionState(status: PushPermissionStatus | null, sentFor: string | null): void {
+    this.permission = status;
+    this.permissionSentFor = status === null ? null : sentFor;
+    if (status === null) return;
+    void this.storage.set(PERMISSION_KEY, JSON.stringify({ status, ...(sentFor ? { sentFor } : {}) }));
   }
 
   // ---- automatic lifecycle events ----
@@ -535,7 +671,7 @@ export class WhisperrClient implements WhisperrApi {
   /** Records the opted-in push channel (if any) that an identify just sent. */
   private rememberPushChannel(userId: string, channels: WhisperrChannel[] | undefined): void {
     const push = channels?.filter((c) => c.type === "push" && c.optedIn !== false).pop();
-    if (push) this.setLastPush(userId, push.address);
+    if (push) this.setLastPush(userId, push.address, pushMeta(push) || undefined);
   }
 
   /**
@@ -564,6 +700,18 @@ export class WhisperrClient implements WhisperrApi {
    * currently-marked token.
    */
   private forgetPushMark(discarded: readonly QueuedOp[]): void {
+    // A permission report that never shipped must re-send on the next report.
+    if (
+      this.permissionSentFor &&
+      discarded.some(
+        (op) =>
+          op.kind === "identify" &&
+          op.externalUserId === this.permissionSentFor &&
+          op.traits?.[PERMISSION_TRAIT] === this.permission,
+      )
+    ) {
+      this.setPermissionState(this.permission, null);
+    }
     const last = this.lastPush;
     if (!last) return;
     for (const op of discarded) {
@@ -580,8 +728,8 @@ export class WhisperrClient implements WhisperrApi {
   }
 
   /** Updates the last-sent (user, token) pair and persists it (write-behind). */
-  private setLastPush(userId: string, token: string): void {
-    this.lastPush = { userId, token };
+  private setLastPush(userId: string, token: string, meta?: string): void {
+    this.lastPush = { userId, token, ...(meta ? { meta } : {}) };
     void this.storage.set(PUSH_KEY, JSON.stringify(this.lastPush));
   }
 
@@ -706,7 +854,7 @@ function withDeviceTraits(traits: Record<string, unknown> | undefined): Record<s
   return Object.keys(merged).length ? merged : undefined;
 }
 
-function buildChannels(params: IdentifyParams, pendingPushToken: string | null): WhisperrChannel[] | undefined {
+function buildChannels(params: IdentifyParams, pendingPushToken: PushRegistration | null): WhisperrChannel[] | undefined {
   const out: WhisperrChannel[] = [];
   if (params.channels && params.channels.length) {
     out.push(...params.channels);
@@ -715,12 +863,13 @@ function buildChannels(params: IdentifyParams, pendingPushToken: string | null):
     // (opted_in / verified stay off the wire). Pass an explicit channel to set them.
     if (params.email) out.push({ type: "email", address: params.email });
     if (params.phone) out.push({ type: "sms", address: params.phone, optedIn: true });
-    if (params.pushToken) out.push({ type: "push", address: params.pushToken, optedIn: true });
+    const push = normalizePushToken(params.pushToken);
+    if (push) out.push(pushChannel(push, true));
   }
   // A token buffered by setPushToken() rides along unless the caller supplied
   // its own push channel.
   if (pendingPushToken && !out.some((c) => c.type === "push")) {
-    out.push({ type: "push", address: pendingPushToken, optedIn: true });
+    out.push(pushChannel(pendingPushToken, true));
   }
   return out.length ? out : undefined;
 }
@@ -733,4 +882,15 @@ function retryDelay(attempt: number, retryAfterMs?: number): number {
 
 function delay(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/** Rebuilds a registration from a persisted metadata signature (see pushMeta). */
+function registrationFromMeta(token: string, meta: string | undefined): PushRegistration {
+  const [kind, platform, pushEnv] = (meta ?? "").split("|");
+  return {
+    token,
+    ...(kind ? { kind: kind as PushRegistration["kind"] } : {}),
+    ...(platform ? { platform: platform as PushRegistration["platform"] } : {}),
+    ...(pushEnv ? { pushEnv: pushEnv as PushRegistration["pushEnv"] } : {}),
+  };
 }

@@ -24,7 +24,8 @@ whisperr.reset();
 ```
 
 - **Pure TypeScript, zero dependencies, zero native modules** — nothing to
-  link, nothing to prebuild; fully compatible with Expo Go.
+  link, nothing to prebuild; fully compatible with Expo Go. (Events work in
+  Expo Go. Remote push on Android needs a development build from Expo SDK 53.)
 - **Automatic app signals** — installed, updated, opened, backgrounded, with
   app / OS / locale / timezone context. No code needed.
 - **Anonymous → identified** — events before login are sent right away under an
@@ -35,6 +36,9 @@ whisperr.reset();
   stable `$message_id` per event so the backend dedups at-least-once retries.
 - **Consent-friendly** — `optIn()` / `optOut()` persist across launches and
   stop all capture, automatic events included.
+- **Push-ready** — token kinds (Expo, FCM, APNs), permission state, and
+  notification-open tracking with deep links. Expo apps get it in one call with
+  [`@whisperr/expo`](packages/expo/README.md).
 
 ## Storage (durability)
 
@@ -155,12 +159,42 @@ explicit channel.
 
 ## Push notifications
 
-The SDK never bundles a push library — hand it the token your own messaging
-setup produces and Whisperr keeps the `push` channel current:
+**Expo app?** Use [`@whisperr/expo`](packages/expo/README.md). It sets up
+native push, asks for permission, registers the Expo push token, and tracks
+notification taps with deep links. The rest of this section is for bare React
+Native, or for apps that wire push by hand.
+
+The SDK never bundles a push library. Hand it the token your messaging setup
+produces, and Whisperr keeps the `push` channel current:
 
 ```ts
-whisperr.setPushToken(token);
+whisperr.setPushToken({ token, kind: "fcm" });
 ```
+
+### Token kinds
+
+The token type tells Whisperr which provider can send to the token. Send it
+when you know it:
+
+| Token | Call |
+|---|---|
+| Expo push token (`ExponentPushToken[…]`) | `setPushToken({ token })` — detected as `expo` |
+| expo-notifications token object | `setPushToken(await Notifications.getExpoPushTokenAsync({ projectId }))` → `expo`; `getDevicePushTokenAsync()` → `apns` on iOS, `fcm` on Android |
+| FCM registration token | `setPushToken({ token, kind: "fcm" })` |
+| Raw APNs device token (hex) | `setPushToken({ token, kind: "apns", pushEnv: "production" })` |
+| OneSignal subscription id | `setPushToken({ token, kind: "onesignal_sub" })` |
+
+- In the object form, `platform` defaults to `Platform.OS`.
+- `pushEnv` is the APNs environment: `sandbox` for development-signed builds
+  (run from Xcode, development profile), `production` for TestFlight and the
+  App Store. The SDK cannot read it, so set it from your build config. Without
+  it, Whisperr cannot tell a sandbox token from a production token.
+- A plain string (`setPushToken(token)`) sends the token only. The server then
+  infers the kind from its format.
+- An APNs token needs an APNs provider in Whisperr. An Expo token needs the
+  Expo provider.
+
+### Token lifecycle
 
 - Called **after login**, it re-identifies the push channel immediately.
 - Called **before login**, the token is buffered and attached to the next
@@ -175,80 +209,136 @@ whisperr.setPushToken(token);
   stale token.
 - After `reset()` (logout), call `setPushToken` again once the next user logs in.
 
-With `@react-native-firebase/messaging`:
+### Permission
+
+Report the OS notification permission on every launch and every return to
+the foreground. A repeated status is a no-op.
+
+```ts
+whisperr.setPushPermission("granted"); // "granted" | "provisional" | "denied" | "undetermined"
+```
+
+- The user gets the trait `push_permission`.
+- `denied` opts this device's token out, so the engine does not choose push
+  for it. While the status is `denied`, `setPushToken()` holds the token back.
+  When you report `granted` or `provisional` again, the SDK registers it again.
+- Before login, the status goes with the next `identify()`.
+
+### Bare React Native with `@react-native-firebase/messaging`
+
+Firebase gives an FCM token on both platforms (on iOS, Firebase maps the APNs
+token to an FCM token for you).
 
 ```tsx
 import messaging from "@react-native-firebase/messaging";
-import { useWhisperrPushToken } from "@whisperr/react-native";
+import { AppState } from "react-native";
+import type { PushPermissionStatus } from "@whisperr/react-native";
 
-function PushBridge() {
-  const [token, setToken] = useState<string | null>(null);
-  useEffect(() => {
-    messaging().getToken().then(setToken);
-    return messaging().onTokenRefresh(setToken);
-  }, []);
-  useWhisperrPushToken(token); // forwards to whisperr.setPushToken()
-  return null;
+// messaging.AuthorizationStatus: -1 NOT_DETERMINED, 0 DENIED, 1 AUTHORIZED, 2 PROVISIONAL, 3 EPHEMERAL
+function toStatus(status: number): PushPermissionStatus {
+  if (status === messaging.AuthorizationStatus.PROVISIONAL) return "provisional";
+  if (status === messaging.AuthorizationStatus.AUTHORIZED || status === messaging.AuthorizationStatus.EPHEMERAL) return "granted";
+  if (status === messaging.AuthorizationStatus.DENIED) return "denied";
+  return "undetermined";
 }
+
+async function registerPush() {
+  // On Android 13+, also request POST_NOTIFICATIONS (PermissionsAndroid).
+  whisperr.setPushPermission(toStatus(await messaging().requestPermission()));
+  whisperr.setPushToken({ token: await messaging().getToken(), kind: "fcm" });
+}
+
+useEffect(() => {
+  void registerPush();
+  const unsubscribe = messaging().onTokenRefresh((token) => whisperr.setPushToken({ token, kind: "fcm" }));
+  // Users change the permission in Settings: check again on each foreground.
+  const sub = AppState.addEventListener("change", async (state) => {
+    if (state === "active") whisperr.setPushPermission(toStatus(await messaging().hasPermission()));
+  });
+  return () => {
+    unsubscribe();
+    sub.remove();
+  };
+}, []);
 ```
 
-With `expo-notifications`:
+### Bare React Native with `react-native-notifications` (direct APNs)
 
 ```tsx
-import * as Notifications from "expo-notifications";
+import { Platform } from "react-native";
+import { Notifications } from "react-native-notifications";
 
-const [token, setToken] = useState<string | null>(null);
-useEffect(() => {
-  Notifications.getDevicePushTokenAsync().then((t) => setToken(t.data));
-  const sub = Notifications.addPushTokenListener((t) => setToken(t.data));
-  return () => sub.remove();
-}, []);
-useWhisperrPushToken(token);
+Notifications.events().registerRemoteNotificationsRegistered(({ deviceToken }) => {
+  whisperr.setPushToken(
+    Platform.OS === "ios"
+      ? { token: deviceToken, kind: "apns", pushEnv: IS_APP_STORE_BUILD ? "production" : "sandbox" }
+      : { token: deviceToken, kind: "fcm" },
+  );
+});
+Notifications.registerRemoteNotifications();
 ```
+
+`IS_APP_STORE_BUILD` is your own build flag (for example from
+`react-native-config`). Report the permission with `setPushPermission()` as
+above.
 
 ### Push opens
 
 Call `trackPushOpened()` when the user taps a notification. It reads
-`whisperr_message_id` (and `deep_link`) from the payload and sends `push_opened`
-once per message, so the engine learns which messages work. Pass the data map,
-or the whole response / message object. A push without `whisperr_message_id`
-did not come from Whisperr and is ignored. Calling it twice for the same tap is
-safe, also across restarts.
+`whisperr_message_id` and the deep link (`whisperr_deep_link`, or `deep_link`)
+from the payload and sends `push_opened` once per message, so the engine
+learns which messages work. Pass the data map, or the whole response / message
+object. A push without `whisperr_message_id` did not come from Whisperr and is
+ignored. Calling it twice for the same tap is safe, also across restarts.
 
-With `expo-notifications`:
+It returns `{ messageId, deepLink }` for a Whisperr push (also for a repeated
+tap, and while opted out), or `null`. Route to `deepLink` yourself.
+`parseWhisperrPush(data)` reads the same fields without sending anything.
+
+With `@react-native-firebase/messaging`:
+
+```tsx
+import messaging from "@react-native-firebase/messaging";
+import { Linking } from "react-native";
+
+function openPush(message) {
+  const open = whisperr.trackPushOpened(message);
+  if (open?.deepLink) void Linking.openURL(open.deepLink);
+}
+
+useEffect(() => {
+  // Cold start: the notification that launched the app.
+  messaging().getInitialNotification().then((message) => message && openPush(message));
+  // Taps that bring the app back from the background.
+  return messaging().onNotificationOpenedApp(openPush);
+}, []);
+```
+
+With `react-native-notifications`:
+
+```tsx
+Notifications.getInitialNotification().then((n) => n && openPush(n.payload));
+Notifications.events().registerNotificationOpened((n, completion) => {
+  openPush(n.payload);
+  completion();
+});
+```
+
+With `expo-notifications` by hand (without `@whisperr/expo`):
 
 ```tsx
 import * as Notifications from "expo-notifications";
 
 useEffect(() => {
-  // Cold start: the tap that launched the app.
   Notifications.getLastNotificationResponseAsync().then((response) => {
     if (response) whisperr.trackPushOpened(response);
   });
-  // Taps while the app runs or is in the background.
   const sub = Notifications.addNotificationResponseReceivedListener((response) => {
     whisperr.trackPushOpened(response);
   });
   return () => sub.remove();
 }, []);
 ```
-
-With `@react-native-firebase/messaging`:
-
-```tsx
-import messaging from "@react-native-firebase/messaging";
-
-useEffect(() => {
-  // Cold start: the notification that launched the app.
-  messaging().getInitialNotification().then((message) => {
-    if (message) whisperr.trackPushOpened(message);
-  });
-  // Taps that bring the app back from the background.
-  return messaging().onNotificationOpenedApp((message) => whisperr.trackPushOpened(message));
-}, []);
-```
-
-Route to `deep_link` yourself if you use it; the SDK only records the open.
 
 ## Delivery
 

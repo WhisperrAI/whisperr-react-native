@@ -1,3 +1,4 @@
+import { pushWireMeta } from "./push.js";
 import type { IdentifyOp, TrackOp } from "./types.js";
 
 export type SendResult = "ok" | "retry" | "auth" | "drop";
@@ -63,6 +64,9 @@ export function identifyBody(op: IdentifyOp): Record<string, unknown> {
       // (or a shortcut that implies them, like an OS-granted push token) set them.
       ...(c.optedIn !== undefined ? { opted_in: c.optedIn } : {}),
       ...(c.verified !== undefined ? { verified: c.verified } : {}),
+      // Push token metadata (kind / platform / push_env): only the known values,
+      // and only on an opted-in entry. An opt-out is matched by address alone.
+      ...(c.optedIn !== false ? pushWireMeta(c) : {}),
     }));
   }
   return body;

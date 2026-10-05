@@ -9,6 +9,73 @@ export interface WhisperrChannel {
   optedIn?: boolean;
   /** Whether the address is verified. */
   verified?: boolean;
+  /** Push only: the token type. Sent as `kind`. */
+  kind?: PushTokenKind;
+  /** Push only: the OS family of the device. Sent as `platform`. */
+  platform?: PushPlatform;
+  /** Push only: the APNs environment of the token. Sent as `push_env`. */
+  pushEnv?: PushEnvironment;
+}
+
+/**
+ * The type of a push token. It tells the server which provider can send to it.
+ *
+ * - `expo` — an Expo push token (`ExponentPushToken[…]`), sent through Expo's push service
+ * - `fcm` — a Firebase Cloud Messaging registration token
+ * - `apns` — a raw APNs device token (hex)
+ * - `onesignal_sub` — a OneSignal subscription id
+ */
+export type PushTokenKind = "fcm" | "apns" | "expo" | "onesignal_sub";
+
+/** The OS family a push token belongs to. */
+export type PushPlatform = "ios" | "android" | "web" | "macos" | "windows" | "linux";
+
+/** The APNs environment of an `apns` token: debug builds get `sandbox` tokens. */
+export type PushEnvironment = "production" | "sandbox";
+
+/** A push token with what the app knows about it. Unknown fields stay unset. */
+export interface PushTokenRegistration {
+  token: string;
+  /**
+   * The token type. When unset, an Expo token (`ExponentPushToken[…]`) is sent
+   * as `expo`; any other token is sent without a kind and the server infers it.
+   */
+  kind?: PushTokenKind;
+  /** Defaults to the OS the app runs on (`Platform.OS`). */
+  platform?: PushPlatform;
+  /** APNs tokens only. The SDK never guesses it. */
+  pushEnv?: PushEnvironment;
+}
+
+/**
+ * The token object `expo-notifications` returns: `getExpoPushTokenAsync()`
+ * gives `{ type: "expo", data }`, `getDevicePushTokenAsync()` gives
+ * `{ type: "ios" | "android", data }` (an APNs or FCM token).
+ */
+export interface ExpoNotificationsPushToken {
+  type: string;
+  data: unknown;
+}
+
+/** Everything setPushToken() accepts. */
+export type PushTokenInput = string | PushTokenRegistration | ExpoNotificationsPushToken;
+
+/**
+ * The notification permission the OS reports for this app.
+ *
+ * - `granted` — notifications show
+ * - `provisional` — iOS quiet delivery (to Notification Center only)
+ * - `denied` — the user turned notifications off
+ * - `undetermined` — the app has not asked yet
+ */
+export type PushPermissionStatus = "granted" | "provisional" | "denied" | "undetermined";
+
+/** A Whisperr push the user opened. */
+export interface WhisperrPushOpen {
+  /** The `whisperr_message_id` from the push data. */
+  messageId: string;
+  /** The deep link from the push data (`whisperr_deep_link` or `deep_link`), if any. */
+  deepLink?: string;
 }
 
 export interface IdentifyParams {
@@ -26,8 +93,12 @@ export interface IdentifyParams {
   email?: string;
   /** Convenience: expands to an opted-in SMS channel. */
   phone?: string;
-  /** Convenience: expands to an opted-in push channel. */
-  pushToken?: string;
+  /**
+   * Convenience: expands to an opted-in push channel. Accepts the same forms as
+   * setPushToken() (a token string, a `{ token, kind, … }` object, or an
+   * expo-notifications token object).
+   */
+  pushToken?: PushTokenInput;
   /** Preferred outreach channel. */
   preferredChannel?: "email" | "sms" | "push";
   /** Full control over channels (overrides the shortcuts when provided). */
@@ -103,14 +174,32 @@ export interface WhisperrError {
 export interface WhisperrApi {
   identify(externalUserId: string, params?: IdentifyParams): void;
   /**
-   * Captures the device push token (FCM registration token / hex APNs token).
-   * With a known user it re-identifies the push channel immediately — a rotated
-   * token opts out the previous one; a repeated token is a no-op. The last-sent
-   * (user, token) pair is persisted through the storage adapter, so both hold
-   * across app restarts. Before identify() it is buffered in memory and
-   * attached to the next identify().
+   * Captures the device push token. With a known user it re-identifies the push
+   * channel immediately — a rotated token opts out the previous one; a repeated
+   * token is a no-op. The last-sent (user, token) pair is persisted through the
+   * storage adapter, so both hold across app restarts. Before identify() it is
+   * buffered in memory and attached to the next identify().
+   *
+   * - A string sends the token only; the server infers its kind.
+   * - `{ token, kind?, platform?, pushEnv? }` also sends the token type. An Expo
+   *   token gets `kind: "expo"`, and `platform` defaults to `Platform.OS`.
+   * - An expo-notifications token object (`getExpoPushTokenAsync()` /
+   *   `getDevicePushTokenAsync()`) is mapped to `expo`, `apns`, or `fcm`.
+   *
+   * While the last reported permission (setPushPermission) is `denied`, the
+   * token is held back and sent when the permission comes back.
    */
-  setPushToken(token: string): void;
+  setPushToken(token: PushTokenInput): void;
+  /**
+   * Reports the OS notification permission. Safe to call on every launch and
+   * every foreground: a repeated status is a no-op, also across restarts.
+   *
+   * The status goes to the user as the trait `push_permission`. `denied` also
+   * opts out the push token this client registered, so the engine stops
+   * choosing push for this device; `granted` / `provisional` registers it again.
+   * Before identify() the status is attached to the next identify().
+   */
+  setPushPermission(status: PushPermissionStatus): void;
   track(eventType: string, properties?: Record<string, unknown>, context?: Record<string, unknown>): void;
   /** Tracks `screen_viewed` with `{ screen_name: name }`. Wire it to your navigator. */
   screen(name: string, properties?: Record<string, unknown>): void;
@@ -121,8 +210,12 @@ export interface WhisperrApi {
    * `push_opened` once per message — repeated calls for the same message are
    * ignored, also across app restarts. A push without `whisperr_message_id`
    * did not come from Whisperr and is ignored.
+   *
+   * Returns the message id and deep link (for your router) whenever the payload
+   * is a Whisperr push — also for a repeated tap or while opted out, which send
+   * nothing. Returns null for other pushes.
    */
-  trackPushOpened(data: unknown): void;
+  trackPushOpened(data: unknown): WhisperrPushOpen | null;
   flush(): Promise<void>;
   reset(): void;
   optIn(): void;

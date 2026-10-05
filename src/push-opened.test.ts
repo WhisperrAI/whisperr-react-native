@@ -69,6 +69,13 @@ describe("extractPushOpened", () => {
     ).toBe("msg_5");
   });
 
+  it("prefers whisperr_deep_link over deep_link", () => {
+    expect(
+      extractPushOpened({ whisperr_message_id: "m", whisperr_deep_link: "app://a", deep_link: "app://b" }),
+    ).toEqual({ messageId: "m", deepLink: "app://a" });
+    expect(extractPushOpened({ whisperr_message_id: "m", deep_link: "app://b" })?.deepLink).toBe("app://b");
+  });
+
   it("reads a OneSignal notification (.additionalData)", () => {
     expect(extractPushOpened({ additionalData: { whisperr_message_id: "msg_6" } })?.messageId).toBe("msg_6");
   });
@@ -91,7 +98,35 @@ describe("trackPushOpened", () => {
     const opens = pushOpens();
     expect(opens).toHaveLength(1);
     expect(opens[0].external_user_id).toBe("user_1");
-    expect(opens[0].properties).toEqual({ whisperr_message_id: "msg_1", deep_link: "app://offer" });
+    // The automatic common properties ride along (whisperr-spec automatic.json).
+    expect(opens[0].properties).toMatchObject({
+      whisperr_message_id: "msg_1",
+      deep_link: "app://offer",
+      platform: "ios",
+      os_name: "ios",
+      sdk_name: "whisperr-react-native",
+    });
+  });
+
+  it("returns the open for the app's router, also for a repeated tap", async () => {
+    const w = makeClient();
+    w.identify("user_1");
+    const data = { data: { whisperr_message_id: "msg_1", whisperr_deep_link: "app://offer" } };
+    expect(w.trackPushOpened(data)).toEqual({ messageId: "msg_1", deepLink: "app://offer" });
+    expect(w.trackPushOpened(data)).toEqual({ messageId: "msg_1", deepLink: "app://offer" });
+    expect(w.trackPushOpened({ data: { campaign: "x" } })).toBeNull();
+    await settle(w);
+    expect(pushOpens()).toHaveLength(1);
+    expect(pushOpens()[0].properties.deep_link).toBe("app://offer");
+  });
+
+  it("returns the open but sends nothing while opted out", async () => {
+    const w = makeClient();
+    w.identify("user_1");
+    w.optOut();
+    expect(w.trackPushOpened({ whisperr_message_id: "msg_1" })).toEqual({ messageId: "msg_1" });
+    await settle(w);
+    expect(pushOpens()).toHaveLength(0);
   });
 
   it("reports each message once per launch (cold-start getter + listener)", async () => {
