@@ -54,7 +54,8 @@
   },
   "overrides": {
     "esbuild": "^0.28.1",
-    "fast-xml-parser": "^5.7.0"
+    "fast-xml-parser": "^5.10.1",
+    "selfsigned": "^5.5.0"
   },
   "keywords": [
     "whisperr",

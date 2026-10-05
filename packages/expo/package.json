@@ -51,6 +51,10 @@
     "typescript": "^5.9.3",
     "vitest": "^4.1.11"
   },
+  "overrides": {
+    "esbuild": "^0.28.1",
+    "uuid": "^11.1.1"
+  },
   "keywords": [
     "whisperr",
     "expo",
