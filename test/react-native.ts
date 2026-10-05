@@ -13,7 +13,16 @@ export const AppState = {
   },
 };
 
-export const Platform = { OS: "ios" as const };
+export const Platform: { OS: string; Version: string | number; constants: Record<string, unknown> } = {
+  OS: "ios",
+  Version: "17.4",
+  constants: { systemName: "iOS" },
+};
+
+/** Test hook: set what Platform reports (OS, Version, constants). */
+export function __setPlatform(next: Partial<typeof Platform>): void {
+  Object.assign(Platform, next);
+}
 
 /** Test hook: simulate an app-state transition. */
 export function __setAppState(state: AppStateStatus): void {
