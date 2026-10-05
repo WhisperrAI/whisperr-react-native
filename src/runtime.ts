@@ -2,7 +2,7 @@
 
 import type { SafeStorage } from "./storage.js";
 
-export const LIB_VERSION = "0.3.0";
+export const LIB_VERSION = "0.4.0";
 
 /**
  * RFC4122 v4 id. Prefers crypto.randomUUID, then crypto.getRandomValues
