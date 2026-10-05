@@ -1,6 +1,20 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
+
+This is a minor release with one breaking change. Read the first two items
+before you upgrade.
+
+- **Breaking:** `screen(name)` now sends `screen_viewed` with the property
+  `screen_name`. It was `name`. Update any dashboards or filters that read
+  `name`.
+- **Automatic events are on by default.** Set `trackAppLifecycleEvents: false`
+  to turn them off.
+- **New optional peers:** `expo-application` and `react-native-device-info`.
+  You do not need to install them. If your app already has one, the SDK uses it
+  to read the app version and build.
+
+Details:
 
 - **Automatic lifecycle events**, on by default (`trackAppLifecycleEvents:
   false` turns them off): `app_installed`, `app_updated` (with
@@ -25,8 +39,7 @@
 - **Email shortcut** no longer claims consent: `identify(id, { email })` sends
   the email channel without `opted_in` (and without `verified`). Pass an explicit
   channel to state consent.
-- Breaking: `screen(name)` now sends `screen_viewed` with `screen_name` (was
-  `name`), and `name` is required.
+- `screen(name)`: `name` is now required (see the breaking change above).
 - `optOut()` also drops a buffered push token; `optIn()` can no longer switch on
   a client created with `disabled: true`.
 
