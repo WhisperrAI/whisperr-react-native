@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+- **Automatic lifecycle events**, on by default (`trackAppLifecycleEvents:
+  false` turns them off): `app_installed`, `app_updated` (with
+  `previous_version` / `previous_build`), `app_opened` (`cold_start`), and
+  `app_backgrounded` (`foreground_ms`), from `AppState`. Each carries the flat
+  properties `app_version`, `app_build`, `platform`, `os_name`, `os_version`,
+  `sdk_name`, `sdk_version`, `locale`, and `timezone` (or
+  `timezone_offset_minutes`). Install / update detection needs durable
+  `storage`. An app that upgrades from SDK 0.2.x never reports a false
+  `app_installed`.
+- **App version without a native dependency:** pass `appVersion` / `appBuild`,
+  or the SDK reads them from `expo-application` or `react-native-device-info`
+  when the app already has one (optional peers). Otherwise the fields are left out.
+- **Anonymous lane** (whisperr-spec `anonymous.json`): events before
+  `identify()` are sent right away under `anonymous_id` instead of waiting on the
+  device; `identify()` carries the handle it promotes; `reset()` rotates it. New
+  handles are bare UUID v4; existing `anon_…` handles are kept.
+- **`trackPushOpened(data)`** sends `push_opened` with `whisperr_message_id` (and
+  `deep_link`), once per message, also across restarts.
+- **Retry-After:** a `429` / `503` with `Retry-After` (seconds or HTTP-date)
+  waits that long, capped at 60 s, instead of the backoff.
+- **Email shortcut** no longer claims consent: `identify(id, { email })` sends
+  the email channel without `opted_in` (and without `verified`). Pass an explicit
+  channel to state consent.
+- Breaking: `screen(name)` now sends `screen_viewed` with `screen_name` (was
+  `name`), and `name` is required.
+- `optOut()` also drops a buffered push token; `optIn()` can no longer switch on
+  a client created with `disabled: true`.
+
 ## 0.2.2
 
 - `identify()` now fills the reserved traits `timezone` (IANA name, from

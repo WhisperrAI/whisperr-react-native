@@ -43,6 +43,7 @@ function makeClient(overrides: Partial<WhisperrOptions> = {}): WhisperrClient {
     apiKey: "wrk_test",
     flushIntervalMs: 0,
     flushOnAppBackground: false,
+    trackAppLifecycleEvents: false, // lifecycle.test.ts covers automatic events
     maxRetries: 0,
     onError: (e) => errors.push(e),
     ...overrides,
@@ -56,23 +57,86 @@ function identifyCalls() {
   return captured.filter((c) => c.path === "/v1/identify");
 }
 
-describe("anonymous buffering", () => {
-  it("holds pre-identify events and attributes them on identify()", async () => {
+describe("anonymous lane", () => {
+  it("sends pre-identify events under anonymous_id and promotes the handle on identify()", async () => {
     const w = makeClient();
-    w.track("app_opened");
+    w.track("pricing_viewed");
     await w.flush();
-    expect(batchCalls()).toHaveLength(0); // buffered, not sent
-    expect(w.pendingCount).toBe(1);
+
+    const anon = batchCalls()[0]!.body.events[0];
+    expect(anon.external_user_id).toBeUndefined();
+    expect(anon.anonymous_id).toMatch(/^[0-9a-f-]{36}$/); // a bare UUID v4
+    expect(w.pendingCount).toBe(0);
 
     w.identify("user_1", { email: "ada@example.com" });
     await w.flush();
+    expect(identifyCalls()[0]!.body.anonymous_id).toBe(anon.anonymous_id);
 
-    const batch = batchCalls();
-    expect(batch).toHaveLength(1);
-    expect(batch[0]!.body.events[0].external_user_id).toBe("user_1");
-    expect(batch[0]!.body.events[0].event_type).toBe("app_opened");
-    expect(identifyCalls()).toHaveLength(1);
-    expect(w.pendingCount).toBe(0);
+    // Promotion is claimed once: a later identify does not repeat the handle.
+    w.identify("user_1", { traits: { plan: "pro" } });
+    await w.flush();
+    expect(identifyCalls()[1]!.body.anonymous_id).toBeUndefined();
+  });
+
+  it("identify() without earlier anonymous events promotes nothing", async () => {
+    const w = makeClient();
+    w.identify("user_1");
+    await w.flush();
+    expect(identifyCalls()[0]!.body).toEqual({ external_user_id: "user_1" });
+  });
+
+  it("events still queued at identify() go out under the user", async () => {
+    status = 503; // hold the anonymous event in the queue
+    const w = makeClient();
+    w.track("pricing_viewed");
+    await w.flush();
+    status = 200;
+    captured = [];
+
+    w.identify("user_1");
+    await w.flush();
+    const ev = batchCalls()[0]!.body.events[0];
+    expect(ev.external_user_id).toBe("user_1");
+    expect(ev.anonymous_id).toBeUndefined();
+    // The anonymous attempt was sent before identify, so the identify promotes it.
+    expect(identifyCalls()[0]!.body.anonymous_id).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it("promotes a handle used in an earlier launch when identify() runs before init resolves", async () => {
+    const storage = new MemoryStorage();
+    const first = makeClient({ storage });
+    first.track("pricing_viewed");
+    await first.close();
+    const anonId = batchCalls()[0]!.body.events[0].anonymous_id;
+
+    captured = [];
+    const second = makeClient({ storage });
+    second.identify("user_1"); // same tick as construction
+    await second.flush();
+    expect(identifyCalls()[0]!.body.anonymous_id).toBe(anonId);
+  });
+
+  it("keeps a pre-0.3 'anon_' handle and stamps restored pre-identify events with it", async () => {
+    const storage = new MemoryStorage();
+    storage.setItem("whisperr.anon_id", "anon_legacy-handle");
+    storage.setItem(
+      "whisperr.queue.v1",
+      JSON.stringify([
+        {
+          kind: "track",
+          eventType: "onboarding_started",
+          externalUserId: null,
+          occurredAt: new Date().toISOString(),
+          messageId: "m1",
+        },
+      ]),
+    );
+    const w = makeClient({ storage });
+    await w.flush();
+    expect(batchCalls()[0]!.body.events[0]).toMatchObject({
+      anonymous_id: "anon_legacy-handle",
+      event_type: "onboarding_started",
+    });
   });
 });
 
@@ -178,6 +242,29 @@ describe("validation and limits", () => {
   });
 });
 
+describe("channel shortcuts", () => {
+  it("email shortcut claims neither consent nor verification", async () => {
+    const w = makeClient();
+    w.identify("user_1", { email: "ada@example.com", phone: "+15551234567" });
+    await w.flush();
+    expect(identifyCalls()[0]!.body.channels).toEqual([
+      { channel: "email", address: "ada@example.com" },
+      { channel: "sms", address: "+15551234567", opted_in: true },
+    ]);
+  });
+
+  it("explicit channels keep the caller's consent and verification", async () => {
+    const w = makeClient();
+    w.identify("user_1", {
+      channels: [{ type: "email", address: "ada@example.com", optedIn: true, verified: true }],
+    });
+    await w.flush();
+    expect(identifyCalls()[0]!.body.channels).toEqual([
+      { channel: "email", address: "ada@example.com", opted_in: true, verified: true },
+    ]);
+  });
+});
+
 describe("consent", () => {
   it("optOut() clears the queue, persists, and mutes future capture", async () => {
     const storage = new MemoryStorage();
@@ -202,6 +289,28 @@ describe("consent", () => {
     next.track("feature_used");
     await next.flush();
     expect(batchCalls()).toHaveLength(1);
+  });
+
+  it("optOut() also stops screen and push-open capture", async () => {
+    const w = makeClient();
+    w.identify("user_1");
+    await w.flush();
+    captured = [];
+    w.optOut();
+    w.screen("Paywall");
+    w.trackPushOpened({ whisperr_message_id: "msg_1" });
+    await w.flush();
+    expect(captured).toHaveLength(0);
+  });
+
+  it("optIn() cannot switch on a client built with disabled: true", async () => {
+    const w = makeClient({ disabled: true });
+    w.optIn();
+    w.identify("user_1");
+    w.track("feature_used");
+    await w.flush();
+    expect(captured).toHaveLength(0);
+    expect(w.ready).toBe(false);
   });
 });
 
@@ -237,20 +346,43 @@ describe("lifecycle", () => {
     expect(captured).toHaveLength(0);
   });
 
-  it("reset() clears identity so later events buffer for the next user", async () => {
+  it("reset() rotates the anonymous handle so the next person starts fresh", async () => {
     const w = makeClient();
+    w.track("pricing_viewed");
+    await w.flush();
+    const first = batchCalls()[0]!.body.events[0].anonymous_id;
     w.identify("user_1");
     await w.flush();
     captured = [];
 
     w.reset();
-    w.track("app_opened"); // anonymous again
+    w.track("pricing_viewed"); // anonymous again, under a new handle
     await w.flush();
-    expect(batchCalls()).toHaveLength(0);
+    const second = batchCalls()[0]!.body.events[0];
+    expect(second.external_user_id).toBeUndefined();
+    expect(second.anonymous_id).toBeTruthy();
+    expect(second.anonymous_id).not.toBe(first);
 
     w.identify("user_2");
     await w.flush();
-    expect(batchCalls()[0]!.body.events[0].external_user_id).toBe("user_2");
+    expect(identifyCalls()[0]!.body).toEqual({ external_user_id: "user_2", anonymous_id: second.anonymous_id });
+  });
+
+  it("reset() keeps an earlier visitor's queued events off the next user", async () => {
+    status = 503;
+    const w = makeClient();
+    w.track("pricing_viewed"); // visitor A, held in the queue
+    await w.flush();
+    const handleA = batchCalls()[0]!.body.events[0].anonymous_id;
+    w.reset();
+    w.identify("user_2"); // visitor B logs in
+    status = 200;
+    captured = [];
+    await w.flush();
+
+    const ev = batchCalls()[0]!.body.events[0];
+    expect(ev.anonymous_id).toBe(handleA);
+    expect(ev.external_user_id).toBeUndefined();
   });
 
   it("reset() clears the persisted last-sent push token so the next login re-sends it", async () => {
@@ -282,11 +414,13 @@ describe("lifecycle", () => {
     const w = makeClient();
     w.identify("user_1");
     w.screen("Paywall", { plan: "pro" });
+    w.screen("   "); // no name — not queued
     await w.flush();
 
-    const ev = batchCalls()[0]!.body.events[0];
-    expect(ev.event_type).toBe("screen_viewed");
-    expect(ev.properties).toEqual({ name: "Paywall", plan: "pro" });
+    const events = batchCalls().flatMap((c) => c.body.events);
+    expect(events).toHaveLength(1);
+    expect(events[0].event_type).toBe("screen_viewed");
+    expect(events[0].properties).toEqual({ screen_name: "Paywall", plan: "pro" });
   });
 });
 

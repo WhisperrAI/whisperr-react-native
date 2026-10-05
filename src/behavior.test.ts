@@ -83,6 +83,7 @@ describe("behavior conformance (whisperr-spec)", () => {
         storage,
         flushIntervalMs: 0,
         flushOnAppBackground: false,
+        trackAppLifecycleEvents: false, // spec harnesses pin only explicit calls
         maxRetries: c.clientOptions?.maxRetries ?? 0,
         onError: (e) => errors.push(e),
       });

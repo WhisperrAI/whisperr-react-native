@@ -32,7 +32,17 @@
   },
   "peerDependencies": {
     "react": ">=17",
-    "react-native": ">=0.65"
+    "react-native": ">=0.65",
+    "expo-application": "*",
+    "react-native-device-info": "*"
+  },
+  "peerDependenciesMeta": {
+    "expo-application": {
+      "optional": true
+    },
+    "react-native-device-info": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/react": "^18.3.0",

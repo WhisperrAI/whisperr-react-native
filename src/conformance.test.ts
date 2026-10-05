@@ -66,6 +66,7 @@ describe("wire conformance (whisperr-spec)", () => {
         apiKey: "wrk_test",
         flushIntervalMs: 0,
         flushOnAppBackground: false,
+        trackAppLifecycleEvents: false, // spec harnesses pin only explicit calls
       });
       const s = c.scenario;
       if (c.op === "track") {
@@ -105,10 +106,30 @@ describe("wire conformance (whisperr-spec)", () => {
           expect(ev.occurred_at, `${c.name}.occurred_at`).toBe(c.expectedOccurredAt);
         }
       } else {
-        for (const [k, v] of Object.entries(c.expectedBody ?? {})) {
+        for (const [k, v] of Object.entries(withKnownDivergences(c.name, c.expectedBody ?? {}))) {
           expect(call!.body[k], `${c.name}.${k}`).toEqual(v);
         }
       }
     }
   }, 20000);
 });
+
+/**
+ * Deliberate, documented departures from the spec fixture while the spec
+ * catches up (plan of record, Workstream 4 step 4: no automatic opt-in).
+ *
+ * - The `email` shortcut asserts no consent: the SDK leaves `opted_in` off
+ *   the email channel instead of claiming `true` for the user. Idempotent, so
+ *   this stays correct once the fixture drops `opted_in` itself.
+ */
+function withKnownDivergences(name: string, expected: Record<string, unknown>): Record<string, unknown> {
+  if (name !== "identify_email_shortcut" || !Array.isArray(expected.channels)) return expected;
+  return {
+    ...expected,
+    channels: (expected.channels as Record<string, unknown>[]).map((ch) => {
+      if (ch.channel !== "email") return ch;
+      const { opted_in: _omitted, ...rest } = ch;
+      return rest;
+    }),
+  };
+}

@@ -69,6 +69,7 @@ describe("push-token conformance (whisperr-spec)", () => {
           storage,
           flushIntervalMs: 0,
           flushOnAppBackground: false,
+        trackAppLifecycleEvents: false, // spec harnesses pin only explicit calls
         });
 
       let w = makeClient();

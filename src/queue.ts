@@ -8,8 +8,9 @@ const QUEUE_KEY = "whisperr.queue.v1";
  * single-instance — no cross-tab races); every mutation schedules a
  * write-behind persist so the queue survives app kills. `restore()` prepends
  * ops from a previous launch ahead of anything captured before it resolved.
- * Pre-identify track ops sit here with a null user id until identify()
- * backfills them.
+ * Pre-identify track ops carry a null user id and the device's anonymous
+ * handle; they are sent under that handle (`anonymous_id`) right away, and
+ * the ones still queued when identify() runs are backfilled to the user.
  */
 export class DurableQueue {
   private ops: QueuedOp[] = [];
@@ -73,16 +74,62 @@ export class DurableQueue {
     this.schedulePersist();
   }
 
-  /** Assign a now-known user id to every still-anonymous track op. */
-  backfillIdentity(externalUserId: string): void {
+  /**
+   * Assign a now-known user id to every still-anonymous track op captured
+   * under `anonymousId` (or before the handle was known). Ops of an earlier
+   * anonymous visitor — a handle rotated away by reset() — keep their own
+   * handle, so they can never attach to the next person who logs in.
+   */
+  backfillIdentity(externalUserId: string, anonymousId?: string): void {
     let changed = false;
     for (const op of this.ops) {
-      if (op.kind === "track" && op.externalUserId === null) {
+      if (
+        op.kind === "track" &&
+        op.externalUserId === null &&
+        (op.anonymousId === undefined || op.anonymousId === anonymousId)
+      ) {
         op.externalUserId = externalUserId;
         changed = true;
       }
     }
     if (changed) this.schedulePersist();
+  }
+
+  /**
+   * Stamp `anonymousId` on anonymous track ops captured before the handle was
+   * known (before init resolved, or restored from an SDK version without the
+   * anonymous lane).
+   */
+  stampAnonymousId(anonymousId: string): void {
+    let changed = false;
+    for (const op of this.ops) {
+      if (op.kind === "track" && op.externalUserId === null && op.anonymousId === undefined) {
+        op.anonymousId = anonymousId;
+        changed = true;
+      }
+    }
+    if (changed) this.schedulePersist();
+  }
+
+  /**
+   * Settle the deferred promotion decision on identify ops queued before init
+   * resolved: `anonymousId` promotes that handle, undefined promotes nothing.
+   * Returns true when some identify now carries the handle.
+   */
+  resolveIdentifyPromotions(anonymousId: string | undefined): boolean {
+    let promoted = false;
+    let changed = false;
+    for (const op of this.ops) {
+      if (op.kind !== "identify" || !op.resolveAnonymous) continue;
+      delete op.resolveAnonymous;
+      if (anonymousId && !promoted) {
+        op.anonymousId = anonymousId;
+        promoted = true; // only the first identify claims the handle
+      }
+      changed = true;
+    }
+    if (changed) this.schedulePersist();
+    return promoted;
   }
 
   clear(): void {

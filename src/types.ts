@@ -18,7 +18,11 @@ export interface IdentifyParams {
    * device unless you supply them — your values always win.
    */
   traits?: Record<string, unknown>;
-  /** Convenience: expands to an opted-in email channel. */
+  /**
+   * Convenience: expands to an email channel. The SDK asserts no consent and no
+   * verification for it — `opted_in` and `verified` are left off the wire. Pass
+   * an explicit channel (`channels`) when you hold that consent.
+   */
   email?: string;
   /** Convenience: expands to an opted-in SMS channel. */
   phone?: string;
@@ -73,6 +77,20 @@ export interface WhisperrOptions {
   maxRetries?: number;
   /** Called when delivery fails (auth/drop/retries exhausted). For observability. */
   onError?: (error: WhisperrError) => void;
+  /**
+   * Track app_installed, app_updated, app_opened, and app_backgrounded
+   * automatically (via AppState). Default true. Install / update detection
+   * needs durable `storage`; without it only opened / backgrounded are sent.
+   */
+  trackAppLifecycleEvents?: boolean;
+  /**
+   * The app's version (e.g. "2.4.1"). Optional: when absent the SDK reads it
+   * from `expo-application` or `react-native-device-info` if your app already
+   * has one of them installed, else leaves `app_version` out.
+   */
+  appVersion?: string;
+  /** The app's build number (e.g. "241"). Same fallback as `appVersion`. */
+  appBuild?: string;
 }
 
 export interface WhisperrError {
@@ -94,7 +112,17 @@ export interface WhisperrApi {
    */
   setPushToken(token: string): void;
   track(eventType: string, properties?: Record<string, unknown>, context?: Record<string, unknown>): void;
-  screen(name?: string, properties?: Record<string, unknown>): void;
+  /** Tracks `screen_viewed` with `{ screen_name: name }`. Wire it to your navigator. */
+  screen(name: string, properties?: Record<string, unknown>): void;
+  /**
+   * Records that the user opened a push notification. Pass the notification
+   * data (or the whole expo-notifications response / Firebase RemoteMessage):
+   * the SDK reads `whisperr_message_id` (and `deep_link`, if present) and sends
+   * `push_opened` once per message — repeated calls for the same message are
+   * ignored, also across app restarts. A push without `whisperr_message_id`
+   * did not come from Whisperr and is ignored.
+   */
+  trackPushOpened(data: unknown): void;
   flush(): Promise<void>;
   reset(): void;
   optIn(): void;
@@ -112,6 +140,13 @@ export interface WhisperrApi {
 export interface IdentifyOp {
   kind: "identify";
   externalUserId: string;
+  /** The anonymous handle this identify promotes (sent as `anonymous_id`). */
+  anonymousId?: string;
+  /**
+   * Set when identify() ran before the persisted anonymous state was read:
+   * the promotion decision is made once init resolves.
+   */
+  resolveAnonymous?: boolean;
   traits?: Record<string, unknown>;
   preferredChannel?: string;
   channels?: WhisperrChannel[];
@@ -121,8 +156,10 @@ export interface IdentifyOp {
 export interface TrackOp {
   kind: "track";
   eventType: string;
-  /** null until the user is identified; filled in on identify(), then sent. */
+  /** null for an anonymous visitor: the event is sent under `anonymousId`. */
   externalUserId: string | null;
+  /** The device's anonymous handle when the event was captured (unset only before init). */
+  anonymousId?: string;
   properties?: Record<string, unknown>;
   context?: Record<string, unknown>;
   occurredAt: string;
