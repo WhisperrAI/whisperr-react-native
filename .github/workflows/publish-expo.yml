@@ -1,0 +1,42 @@
+name: Publish @whisperr/expo
+
+# Publishes packages/expo when an expo tag is pushed:
+#   git tag expo-v0.1.0 && git push origin expo-v0.1.0
+#
+# Auth: npm Trusted Publishing (OIDC), like publish.yml. Before the first
+# release, add a Trusted Publisher for @whisperr/expo on npmjs.com (repo
+# WhisperrAI/whisperr-react-native, workflow publish-expo.yml, environment
+# production). Publish @whisperr/react-native 0.4.0 first: @whisperr/expo
+# peer-depends on it.
+
+on:
+  push:
+    tags:
+      - "expo-v*"
+
+permissions:
+  contents: read
+  id-token: write # required for OIDC trusted publishing + provenance
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - run: npm install -g npm@latest
+      - run: npm ci
+      - run: npm ci
+        working-directory: packages/expo
+      - run: npm run build
+        working-directory: packages/expo
+      - run: npm run typecheck
+        working-directory: packages/expo
+      - run: npm test
+        working-directory: packages/expo
+      - run: npm publish --provenance
+        working-directory: packages/expo

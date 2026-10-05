@@ -1,6 +1,7 @@
 import { createContext, createElement, useContext, useEffect, useRef, type ReactElement, type ReactNode } from "react";
 import { WhisperrClient } from "./client.js";
-import type { WhisperrApi, WhisperrOptions } from "./types.js";
+import { Whisperr } from "./singleton.js";
+import type { PushTokenInput, WhisperrApi, WhisperrOptions } from "./types.js";
 
 const WhisperrContext = createContext<WhisperrApi | null>(null);
 
@@ -44,10 +45,19 @@ export function useWhisperr(): WhisperrApi {
 }
 
 /**
+ * The client from the nearest <WhisperrProvider>, else the Whisperr.init()
+ * singleton, else null. Never throws — for helpers that work with or without
+ * a provider.
+ */
+export function useWhisperrClient(): WhisperrApi | null {
+  return useContext(WhisperrContext) ?? Whisperr.instance;
+}
+
+/**
  * Forwards a push token from your messaging library to Whisperr whenever it
  * changes. Pass whatever your push setup produces — an FCM registration token
- * (`@react-native-firebase/messaging`) or an Expo/device token
- * (`expo-notifications`); null/undefined while the token is still loading.
+ * (`@react-native-firebase/messaging`), an expo-notifications token object, or
+ * `{ token, kind, pushEnv }`; null/undefined while the token is still loading.
  *
  * ```tsx
  * const [token, setToken] = useState<string | null>(null);
@@ -58,9 +68,13 @@ export function useWhisperr(): WhisperrApi {
  * useWhisperrPushToken(token);
  * ```
  */
-export function useWhisperrPushToken(token: string | null | undefined): void {
+export function useWhisperrPushToken(token: PushTokenInput | null | undefined): void {
   const whisperr = useWhisperr();
+  // Objects are compared by content, so an inline `{ token, kind }` literal
+  // does not re-run the effect on every render.
+  const key = token == null ? null : typeof token === "string" ? token : JSON.stringify(token);
   useEffect(() => {
     if (token) whisperr.setPushToken(token);
-  }, [whisperr, token]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [whisperr, key]);
 }

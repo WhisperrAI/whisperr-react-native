@@ -1,0 +1,69 @@
+{
+  "name": "@whisperr/expo",
+  "version": "0.1.0",
+  "description": "Push notifications for Expo apps on Whisperr: config plugin, permission + Expo push token registration, and notification-open tracking with deep links.",
+  "license": "MIT",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    },
+    "./app.plugin.js": "./app.plugin.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "plugin/build",
+    "app.plugin.js"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "@whisperr/react-native": ">=0.4.0",
+    "expo": ">=52",
+    "expo-constants": "*",
+    "expo-notifications": "*",
+    "react": ">=18",
+    "react-native": ">=0.76"
+  },
+  "devDependencies": {
+    "@types/react": "^19.3.0",
+    "expo": "^57.0.26",
+    "expo-constants": "^57.0.20",
+    "expo-notifications": "^57.0.21",
+    "react": "^19.3.0",
+    "react-native": "^0.83.10",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11"
+  },
+  "keywords": [
+    "whisperr",
+    "expo",
+    "expo-notifications",
+    "push-notifications",
+    "config-plugin",
+    "react-native",
+    "churn"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/WhisperrAI/whisperr-react-native.git",
+    "directory": "packages/expo"
+  },
+  "homepage": "https://github.com/WhisperrAI/whisperr-react-native/tree/main/packages/expo#readme"
+}

@@ -25,3 +25,22 @@ jobs:
       - run: npm test
         env:
           WHISPERR_SPEC_PATH: ${{ github.workspace }}/whisperr-spec/conformance/wire.json
+
+  expo:
+    # @whisperr/expo (packages/expo). Its tests and types resolve
+    # @whisperr/react-native to this repo's src/, so install the root first.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm ci
+      - run: npm ci
+        working-directory: packages/expo
+      - run: npm run build
+        working-directory: packages/expo
+      - run: npm run typecheck
+        working-directory: packages/expo
+      - run: npm test
+        working-directory: packages/expo

@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.4.0
+
+- **Push token kinds** (whisperr-spec `push.json` `kindCases`):
+  `setPushToken()` also takes `{ token, kind, platform, pushEnv }` and the
+  expo-notifications token objects. An Expo token in the object form is sent
+  as `kind: "expo"`; `platform` defaults to `Platform.OS`; `pushEnv` is never
+  guessed. A plain string sends the token only, as before. A token that is
+  re-sent with new metadata goes out once more; a bare token never removes
+  metadata already sent. `identify({ pushToken })` takes the same forms.
+- **`setPushPermission(status)`** (`granted` | `provisional` | `denied` |
+  `undetermined`): sends the trait `push_permission`, deduped across restarts.
+  `denied` opts out this device's token and holds it until the permission
+  comes back. Before login, the status goes with the next `identify()`.
+- **`trackPushOpened()` returns `{ messageId, deepLink }`** (or `null`) so the
+  app can route. It reads `whisperr_deep_link`, then `deep_link`.
+  `push_opened` now carries the common automatic properties.
+- **New exports:** `parseWhisperrPush()`, `isExpoPushToken()`,
+  `useWhisperrClient()` (the provider's client or the singleton, never throws),
+  and the push types.
+- A token set before init resolves now waits for the restored last-sent pair,
+  so a same-tick `identify()` + `setPushToken()` on launch stays a no-op.
+- **New package [`@whisperr/expo`](packages/expo/README.md)**: config plugin,
+  `registerForPushNotifications()`, `useWhisperrNotificationResponse()`.
+
 ## 0.3.0
 
 This is a minor release with one breaking change. Read the first two items

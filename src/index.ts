@@ -1,29 +1,28 @@
+import { extractPushOpened } from "./autocapture.js";
 import { WhisperrClient } from "./client.js";
-import type { WhisperrApi, WhisperrOptions } from "./types.js";
+import { Whisperr } from "./singleton.js";
+import type { WhisperrPushOpen } from "./types.js";
 
 export * from "./types.js";
-export { WhisperrClient };
+export { WhisperrClient, Whisperr };
 export { MemoryStorage } from "./storage.js";
-export { WhisperrProvider, useWhisperr, useWhisperrPushToken, type WhisperrProviderProps } from "./react.js";
-
-let singleton: WhisperrClient | null = null;
+export { isExpoPushToken } from "./push.js";
+export {
+  WhisperrProvider,
+  useWhisperr,
+  useWhisperrClient,
+  useWhisperrPushToken,
+  type WhisperrProviderProps,
+} from "./react.js";
 
 /**
- * Whisperr.init() creates the singleton client (idempotent). Construct
- * WhisperrClient directly when you want explicit lifetimes or more than one
- * client.
+ * Reads `whisperr_message_id` and the deep link from a push payload (the data
+ * map, a Firebase RemoteMessage, an expo-notifications response, or a
+ * OneSignal notification) without sending anything. Null for a push that did
+ * not come from Whisperr.
  */
-export const Whisperr = {
-  init(options: WhisperrOptions): WhisperrApi {
-    if (!singleton) {
-      singleton = new WhisperrClient(options);
-    }
-    return singleton;
-  },
-  /** The current client, or null if init() hasn't run. */
-  get instance(): WhisperrApi | null {
-    return singleton;
-  },
-};
+export function parseWhisperrPush(data: unknown): WhisperrPushOpen | null {
+  return extractPushOpened(data) ?? null;
+}
 
 export default Whisperr;

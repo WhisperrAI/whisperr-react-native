@@ -4,6 +4,7 @@
  * Flutter SDKs and the backend — do not rename them.
  */
 import type { AppInfo } from "./app-info.js";
+import type { WhisperrPushOpen } from "./types.js";
 import { deviceTraits } from "./device.js";
 import { currentOSInfo } from "./lifecycle.js";
 import { LIB_VERSION } from "./runtime.js";
@@ -110,13 +111,10 @@ export function parseStoredAppVersion(raw: string | null): StoredAppVersion | nu
 }
 
 /** A Whisperr push the user opened. */
-export interface PushOpenedPayload {
-  messageId: string;
-  deepLink?: string;
-}
+export type PushOpenedPayload = WhisperrPushOpen;
 
 /**
- * Finds `whisperr_message_id` (and `deep_link`) in whatever the app's push
+ * Finds `whisperr_message_id` (and the deep link) in whatever the app's push
  * library hands over: the data map itself, a Firebase RemoteMessage
  * (`.data`), an expo-notifications response or notification
  * (`.notification.request.content.data`, the native payload under
@@ -126,7 +124,9 @@ export function extractPushOpened(input: unknown): PushOpenedPayload | undefined
   for (const data of candidateMaps(input)) {
     const messageId = stringValue(data.whisperr_message_id);
     if (!messageId) continue;
-    const deepLink = stringValue(data.deep_link);
+    // Whisperr sends the link as `whisperr_deep_link`; `deep_link` is the
+    // spec's name and what earlier backends sent.
+    const deepLink = stringValue(data.whisperr_deep_link) ?? stringValue(data.deep_link);
     return deepLink ? { messageId, deepLink } : { messageId };
   }
   return undefined;
