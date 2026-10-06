@@ -118,7 +118,7 @@ export interface WhisperrStorage {
 }
 
 export interface WhisperrOptions {
-  /** App ingestion key (wrk_…). Required. */
+  /** Publishable ingestion key (wpk_…). Required. Never ship a server key (wrk_…) in an app. */
   apiKey: string;
   /** Ingestion base URL. Defaults to https://api.whisperr.net. */
   baseUrl?: string;

@@ -11,7 +11,7 @@ npm i @whisperr/react-native
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Whisperr } from "@whisperr/react-native";
 
-const whisperr = Whisperr.init({ apiKey: "wrk_…", storage: AsyncStorage });
+const whisperr = Whisperr.init({ apiKey: "wpk_…", storage: AsyncStorage });
 
 // after the user logs in / on session restore
 whisperr.identify("user_123", { traits: { first_name: "Ada", plan: "pro" } });
@@ -48,7 +48,7 @@ AsyncStorage-compatible adapter (`getItem`/`setItem`/`removeItem`):
 ```ts
 // The common case:
 import AsyncStorage from "@react-native-async-storage/async-storage";
-Whisperr.init({ apiKey: "wrk_…", storage: AsyncStorage });
+Whisperr.init({ apiKey: "wpk_…", storage: AsyncStorage });
 
 // Or MMKV, expo-sqlite/kv-store, SecureStore — anything with the same shape.
 ```
@@ -64,7 +64,7 @@ import { WhisperrProvider, useWhisperr } from "@whisperr/react-native";
 
 export default function App() {
   return (
-    <WhisperrProvider options={{ apiKey: "wrk_…", storage: AsyncStorage }}>
+    <WhisperrProvider options={{ apiKey: "wpk_…", storage: AsyncStorage }}>
       <Root />
     </WhisperrProvider>
   );
@@ -357,7 +357,7 @@ useEffect(() => {
 
 ```ts
 Whisperr.init({
-  apiKey: "wrk_…",
+  apiKey: "wpk_…",
   storage: AsyncStorage,      // durable queue + identity (recommended)
   flushAt: 20,                // flush when this many events are queued
   flushIntervalMs: 10000,     // periodic flush
