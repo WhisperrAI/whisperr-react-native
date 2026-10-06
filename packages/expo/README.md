@@ -71,7 +71,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Whisperr } from "@whisperr/react-native";
 import { registerForPushNotifications } from "@whisperr/expo";
 
-const whisperr = Whisperr.init({ apiKey: "wrk_…", storage: AsyncStorage });
+const whisperr = Whisperr.init({ apiKey: "wpk_…", storage: AsyncStorage });
 
 // After login, at the moment you want the OS prompt:
 whisperr.identify(user.id, { traits: { first_name: user.firstName } });
