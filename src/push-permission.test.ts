@@ -355,6 +355,19 @@ describe("optOut() opts this device's push token out on the server", () => {
     expect(identifies).toEqual([OPT_OUT]);
   });
 
+  it("sends nothing on launches that pass the token before start", async () => {
+    const storage = new MemoryStorage();
+    storage.setItem("whisperr.optout", "1");
+    for (let launch = 0; launch < 2; launch++) {
+      const w = makeClient({ storage });
+      w.setPushToken("fcm_tok_a");
+      w.identify("user_1");
+      await settle(w);
+      await w.close();
+    }
+    expect(identifies).toEqual([]);
+  });
+
   it("keeps an undelivered opt-out across optOut(), optIn(), optOut()", async () => {
     const w = await registered();
     status = 503;

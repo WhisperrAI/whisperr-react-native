@@ -95,6 +95,8 @@ export class WhisperrClient implements WhisperrApi {
   /** The device had SDK state before this launch (so a missing version record is not an install). */
   private hadPriorState = false;
   private readonly priorState: Promise<boolean>;
+  /** The last-sent pair an earlier launch persisted, read before this launch can write one. */
+  private readonly launchPush: Promise<string | null>;
   private initialized = false;
   /**
    * Token captured before identify() (attached to the next identify), or held
@@ -163,6 +165,7 @@ export class WhisperrClient implements WhisperrApi {
     this.priorState = Promise.all(PRIOR_STATE_KEYS.map((key) => this.storage.get(key))).then((values) =>
       values.some((v) => v !== null),
     );
+    this.launchPush = this.storage.get(PUSH_KEY);
     this.queue = new DurableQueue(this.storage, options.maxQueueSize ?? 1000);
     this.session = new Session(this.storage);
     this.transport = new Transport(baseUrl, options.apiKey, options.requestTimeoutMs ?? 10000, this.debug);
@@ -416,21 +419,8 @@ export class WhisperrClient implements WhisperrApi {
     // and a fresher pair already set in memory (a setPushToken that raced init)
     // is never clobbered.
     if (!this.pushCleared && !this.lastPush) {
-      const rawPush = await this.storage.get(PUSH_KEY);
-      if (rawPush && !this.lastPush) {
-        try {
-          const parsed = JSON.parse(rawPush) as { userId?: unknown; token?: unknown; meta?: unknown };
-          if (typeof parsed.userId === "string" && typeof parsed.token === "string") {
-            this.lastPush = {
-              userId: parsed.userId,
-              token: parsed.token,
-              ...(typeof parsed.meta === "string" && parsed.meta ? { meta: parsed.meta } : {}),
-            };
-          }
-        } catch {
-          /* corrupt payload — discard */
-        }
-      }
+      const restored = parseLastPush(await this.storage.get(PUSH_KEY));
+      if (restored && !this.lastPush) this.lastPush = restored;
     }
 
     // The permission is reported through setPushPermission(), which waits for
@@ -462,7 +452,10 @@ export class WhisperrClient implements WhisperrApi {
       // opt-outs that have not reached the server.
       this.queue.rewrite(pushRetirement);
       this.pendingPushToken = null;
-      // SDK 0.4.x opted out locally only and kept the last-sent pair.
+      // SDK 0.4.x opted out locally only and kept the last-sent pair. Only a
+      // pair from an earlier launch counts: one identify() marked this launch
+      // before the opt-out was read never reached the server.
+      this.lastPush = this.pushCleared ? null : parseLastPush(await this.launchPush);
       this.queuePushOptOut();
       this.initialized = true;
       return;
@@ -580,8 +573,8 @@ export class WhisperrClient implements WhisperrApi {
    */
   private queuePushOptOut(): void {
     const last = this.lastPush;
-    if (!last) return;
     this.forgetLastPush();
+    if (!last) return;
     this.enqueue({
       kind: "identify",
       externalUserId: last.userId,
@@ -886,6 +879,21 @@ function pushRetirement(op: QueuedOp): IdentifyOp | null {
   const retired = op.channels?.filter((c) => c.type === "push" && c.optedIn === false) ?? [];
   if (!retired.length) return null;
   return { kind: "identify", externalUserId: op.externalUserId, channels: retired, occurredAt: op.occurredAt };
+}
+
+function parseLastPush(raw: string | null): { userId: string; token: string; meta?: string } | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as { userId?: unknown; token?: unknown; meta?: unknown };
+    if (typeof parsed.userId !== "string" || typeof parsed.token !== "string") return null;
+    return {
+      userId: parsed.userId,
+      token: parsed.token,
+      ...(typeof parsed.meta === "string" && parsed.meta ? { meta: parsed.meta } : {}),
+    };
+  } catch {
+    return null; // corrupt payload — discard
+  }
 }
 
 /** SDK 0.4.x stored `{ status, sentFor }` and never sent the event, so it parses as not sent. */
