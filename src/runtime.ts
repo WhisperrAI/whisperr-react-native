@@ -5,9 +5,11 @@ import type { SafeStorage } from "./storage.js";
 export const LIB_VERSION = "0.4.0";
 
 /**
- * RFC4122 v4 id. Prefers crypto.randomUUID, then crypto.getRandomValues
- * (present on modern Hermes and on JSC/Expo with the usual polyfills); only
- * engines with no crypto at all hit the insecure last resort.
+ * RFC4122 v4 id. Uses crypto.randomUUID, then crypto.getRandomValues, when the
+ * runtime has them. Hermes has no global crypto unless the app installs a
+ * polyfill (for example react-native-get-random-values), so there the
+ * Math.random fallback is the normal path. The ids are identifiers (anonymous
+ * handle, session, message ids), never secrets.
  */
 export function uuid(): string {
   const c = (
@@ -26,8 +28,7 @@ export function uuid(): string {
     const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
     return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
   }
-  // Last resort (non-crypto): ids stay unique enough for attribution, but are
-  // predictable — acceptable because they are identifiers, never secrets.
+  // No crypto: ids stay unique enough for attribution, but are predictable.
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (ch) => {
     const r = (Math.random() * 16) | 0;
     const v = ch === "x" ? r : (r & 0x3) | 0x8;
