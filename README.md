@@ -237,11 +237,14 @@ whisperr.setPushPermission("granted"); // "granted" | "provisional" | "denied" |
 push token, the SDK first sends one identify that opts that token out, so
 Whisperr stops sending push to this device. The identify goes to the user the
 token was registered for. After `identify()` without `reset()`, that is not
-always the current user. The SDK retries that request like any other, also
-after a restart. An app that opted out with SDK 0.4.x sends this request once
-at the first start after the upgrade. Email, SMS, and the user's other devices
-keep their state, and data already sent is not deleted. After `optIn()`, call
-`setPushToken()` again to register the token.
+always the current user. Push opt-outs that are still queued (a token
+rotation, a `denied` report, an earlier `optOut()`) are kept and go first, so
+a token retired before the opt-out stays retired. The SDK retries these
+requests like any other, also after a restart. An app that opted out with SDK
+0.4.x sends this request once at the first start after the upgrade. Email,
+SMS, and the user's other devices keep their state, and data already sent is
+not deleted. After `optIn()`, call `setPushToken()` again to register the
+token.
 
 ### Bare React Native with `@react-native-firebase/messaging`
 

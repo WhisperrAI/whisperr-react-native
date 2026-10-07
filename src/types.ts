@@ -227,8 +227,9 @@ export interface WhisperrApi {
    * nothing is queued or sent until optIn(). Persisted across restarts and
    * reset(). When this device registered a push token, one identify opts that
    * token out on the server first, under the user the token was registered
-   * for (not always the current user). Email, SMS, and the user's other
-   * devices keep their state.
+   * for (not always the current user). Push opt-outs already queued are kept
+   * and go before it. Email, SMS, and the user's other devices keep their
+   * state.
    */
   optOut(): void;
   /** Flushes, stops timers, and detaches listeners. The client is unusable afterward. */
@@ -255,8 +256,6 @@ export interface IdentifyOp {
   preferredChannel?: string;
   channels?: WhisperrChannel[];
   occurredAt: string;
-  /** The push opt-out optOut() queued: the one op delivered while opted out. */
-  optOut?: true;
 }
 
 export interface TrackOp {

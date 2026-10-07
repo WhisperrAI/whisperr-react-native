@@ -355,6 +355,48 @@ describe("optOut() opts this device's push token out on the server", () => {
     expect(identifies).toEqual([OPT_OUT]);
   });
 
+  it("keeps an undelivered opt-out across optOut(), optIn(), optOut()", async () => {
+    const w = await registered();
+    status = 503;
+    w.optOut();
+    w.optIn();
+    w.setPushToken("fcm_tok_b");
+    w.optOut();
+    await settle(w);
+    status = 200;
+    await w.flush();
+    expect(identifies).toEqual([
+      OPT_OUT,
+      { external_user_id: "user_1", channels: [{ channel: "push", address: "fcm_tok_b", opted_in: false }] },
+    ]);
+  });
+
+  it("keeps the retirement of a queued rotation", async () => {
+    const w = await registered();
+    status = 503;
+    w.setPushToken("fcm_tok_b");
+    w.optOut();
+    await settle(w);
+    status = 200;
+    await w.flush();
+    expect(identifies).toEqual([
+      OPT_OUT,
+      { external_user_id: "user_1", channels: [{ channel: "push", address: "fcm_tok_b", opted_in: false }] },
+    ]);
+  });
+
+  it("keeps the retirement a denied permission queued", async () => {
+    const w = await registered();
+    status = 503;
+    w.setPushPermission("denied");
+    await settle(w);
+    w.optOut();
+    status = 200;
+    await w.flush();
+    expect(identifies).toEqual([OPT_OUT]);
+    expect(events).toEqual([]);
+  });
+
   it("is not lost when optOut() runs while a batch is in flight", async () => {
     const w = await registered();
     let release!: () => void;

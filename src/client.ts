@@ -30,6 +30,7 @@ import { LIB_VERSION, nowISO, Session, uuid } from "./runtime.js";
 import { MemoryStorage, SafeStorage } from "./storage.js";
 import { Transport, type SendOutcome } from "./transport.js";
 import type {
+  IdentifyOp,
   IdentifyParams,
   PushPermissionStatus,
   PushTokenInput,
@@ -109,7 +110,7 @@ export class WhisperrClient implements WhisperrApi {
   private lastPush: { userId: string; token: string; meta?: string } | null = null;
   /** The device's notification permission; null until the app reports one. */
   private permission: PermissionRecord | null = null;
-  /** optOut() ran (persisted as OPTOUT_KEY). Only the push opt-out op it queued is sent. */
+  /** optOut() ran (persisted as OPTOUT_KEY). Only queued push opt-outs are sent. */
   private optedOut = false;
   private closed = false;
   /** identify()/reset() ran before init resolved — don't adopt the persisted user. */
@@ -355,7 +356,7 @@ export class WhisperrClient implements WhisperrApi {
     if (this.closed || this.optedOut) return; // a second call must not drop the queued opt-out
     this.optedOut = true;
     this.pendingPushToken = null;
-    this.queue.clear();
+    this.queue.rewrite(pushRetirement);
     void this.storage.set(OPTOUT_KEY, "1");
     // Before init the last-sent pair is not restored yet; init sends it.
     if (this.initialized) this.queuePushOptOut();
@@ -457,9 +458,9 @@ export class WhisperrClient implements WhisperrApi {
     await this.queue.restore();
 
     if (this.optedOut) {
-      // Drop anything captured before the opt-out was read; keep a push
-      // opt-out from the previous launch that has not reached the server.
-      this.queue.retain((op) => op.kind === "identify" && op.optOut === true);
+      // Drop anything captured before the opt-out was read; keep push
+      // opt-outs that have not reached the server.
+      this.queue.rewrite(pushRetirement);
       this.pendingPushToken = null;
       // SDK 0.4.x opted out locally only and kept the last-sent pair.
       this.queuePushOptOut();
@@ -586,7 +587,6 @@ export class WhisperrClient implements WhisperrApi {
       externalUserId: last.userId,
       channels: [{ type: "push", address: last.token, optedIn: false }],
       occurredAt: nowISO(),
-      optOut: true,
     });
     void this.flush();
   }
@@ -758,7 +758,7 @@ export class WhisperrClient implements WhisperrApi {
     void this.storage.remove(PUSH_KEY);
   }
 
-  /** Sends the queue in order. While opted out it holds only the push opt-out op. */
+  /** Sends the queue in order. While opted out it holds only push opt-outs. */
   private async drain(): Promise<void> {
     await this.initPromise;
 
@@ -874,6 +874,18 @@ export class WhisperrClient implements WhisperrApi {
 interface PermissionRecord {
   status: PushPermissionStatus;
   sent?: PushPermissionWireStatus;
+}
+
+/**
+ * `op` cut down to the push tokens it opts out (a rotation, a denied
+ * permission, an earlier optOut()), or null when it retires none. optOut()
+ * keeps these, so a token retired before the opt-out stays retired.
+ */
+function pushRetirement(op: QueuedOp): IdentifyOp | null {
+  if (op.kind !== "identify") return null;
+  const retired = op.channels?.filter((c) => c.type === "push" && c.optedIn === false) ?? [];
+  if (!retired.length) return null;
+  return { kind: "identify", externalUserId: op.externalUserId, channels: retired, occurredAt: op.occurredAt };
 }
 
 /** SDK 0.4.x stored `{ status, sentFor }` and never sent the event, so it parses as not sent. */
