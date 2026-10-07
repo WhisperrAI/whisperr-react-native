@@ -410,7 +410,7 @@ describe("lifecycle", () => {
     ]);
   });
 
-  it("screen() tracks screen_viewed with the screen name", async () => {
+  it("screen() tracks screen_viewed with the screen name and the common properties", async () => {
     const w = makeClient();
     w.identify("user_1");
     w.screen("Paywall", { plan: "pro" });
@@ -420,7 +420,12 @@ describe("lifecycle", () => {
     const events = batchCalls().flatMap((c) => c.body.events);
     expect(events).toHaveLength(1);
     expect(events[0].event_type).toBe("screen_viewed");
-    expect(events[0].properties).toEqual({ screen_name: "Paywall", plan: "pro" });
+    expect(events[0].properties).toMatchObject({
+      screen_name: "Paywall",
+      plan: "pro",
+      platform: "ios",
+      sdk_name: "whisperr-react-native",
+    });
   });
 });
 

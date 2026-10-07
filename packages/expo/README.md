@@ -109,8 +109,10 @@ prompt), `androidChannel` (`{ id, name, importance }` or `false`), `watch`
 
 ### What Whisperr does with the permission
 
-- The user gets the trait `push_permission`: `granted`, `provisional`,
-  `denied`, or `undetermined`.
+- A new status sends the event `push_permission_changed` with `status`
+  (`authorized`, `provisional`, `denied`, or `not_determined`) and the status
+  sent before it (`previous_status`). A repeated status sends nothing, also
+  across restarts.
 - `denied` opts this device's push token out, so the engine does not choose
   push for it. When the permission comes back, the SDK registers the token
   again.

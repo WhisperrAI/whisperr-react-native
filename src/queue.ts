@@ -132,8 +132,9 @@ export class DurableQueue {
     return promoted;
   }
 
-  clear(): void {
-    this.ops = [];
+  /** Replaces each op with what `map` returns; null drops it. */
+  rewrite(map: (op: QueuedOp) => QueuedOp | null): void {
+    this.ops = this.ops.flatMap((op) => map(op) ?? []);
     this.schedulePersist();
   }
 

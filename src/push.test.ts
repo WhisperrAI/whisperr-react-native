@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WhisperrClient } from "./client.js";
+import type { PushPermissionStatus } from "./types.js";
 
 // Device-derived trait defaults (timezone / locale) are environment-dependent,
 // so the spec fixtures never pin them (SPEC.md → Reserved trait keys): run with
@@ -23,7 +24,18 @@ type Step =
   | { identify: { externalUserId: string; [k: string]: unknown } }
   | { setPushToken: string | { token: string; kind?: string; platform?: string; pushEnv?: string } }
   | { restart: boolean }
-  | { reset: boolean };
+  | { reset: boolean }
+  | { optOut: boolean }
+  | { optIn: boolean }
+  | { pushPermission: "authorized" | "provisional" | "denied" | "not_determined" };
+
+/** The spec's status names, in this SDK's permission vocabulary. */
+const PERMISSION: Record<string, PushPermissionStatus> = {
+  authorized: "granted",
+  provisional: "provisional",
+  denied: "denied",
+  not_determined: "undetermined",
+};
 
 interface PushCase {
   name: string;
@@ -94,7 +106,16 @@ async function runCases(cases: PushCase[]): Promise<void> {
       } else if ("reset" in step) {
         w.reset();
         await w.flush();
-      } else {
+      } else if ("optOut" in step) {
+        w.optOut();
+        await w.flush();
+      } else if ("optIn" in step) {
+        w.optIn();
+        await w.flush();
+      } else if ("pushPermission" in step) {
+        w.setPushPermission(PERMISSION[step.pushPermission]!);
+        await w.flush();
+      } else if ("restart" in step) {
         // restart: tear down the client, construct a fresh one on the same
         // storage. Do NOT drain init here — real apps call identify() /
         // setPushToken() in the launch tick, before the async restore
@@ -103,6 +124,8 @@ async function runCases(cases: PushCase[]): Promise<void> {
         // skips restoring the persisted push pair once identify() has run.
         await w.close();
         w = makeClient();
+      } else {
+        throw new Error(`${c.name}: unknown step ${JSON.stringify(step)}`);
       }
     }
     await w.close();

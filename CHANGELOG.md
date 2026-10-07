@@ -1,5 +1,41 @@
 # Changelog
 
+## Unreleased
+
+- **Removed: the identify trait `push_permission`.** `setPushPermission()` no
+  longer writes it. An app or a dashboard filter that reads this trait gets no
+  new values. Use the event `push_permission_changed` (below) instead.
+- **Push permission and the token** (whisperr-spec SPEC.md "Push permission
+  and the token"): `denied` opts this device's push token out and holds it.
+  A token set while `denied` is held, not sent. `granted` or `provisional`
+  opts the held token back in. The opt-out identify is now partial
+  (`external_user_id` + `channels`). When this token was the user's only
+  opted-in channel, the server marks the user suppressed
+  (`all_channels_opted_out`) until a channel is opted in again.
+- **`setPushPermission(status)` sends the event `push_permission_changed`**
+  (whisperr-spec `automatic.json`) instead of the trait `push_permission`. The
+  engine reads only the event, so "notifications turned off after a push" is
+  now visible for React Native apps. `status` uses the spec names
+  (`granted` → `authorized`, `undetermined` → `not_determined`) and
+  `previous_status` carries the last status sent from this device. The event
+  is sent once per change, also across restarts; before login it goes out
+  under the anonymous id. `reset()` forgets the sent status. The SDK no longer
+  writes the `push_permission` trait. The `PushPermissionStatus` type does not
+  change. After an upgrade from 0.4.x, the first report sends the event once.
+- **`optOut()` tells the server about this device.** When this device
+  registered a push token, it sends one identify that opts the token out,
+  under the user the token was registered for (after `identify()` without
+  `reset()`, not always the current user). Push opt-outs still queued (a
+  rotation, a `denied` report, an earlier `optOut()`) are kept ahead of it.
+  The SDK delivers and retries them while opted out, also after a restart. It
+  then sends nothing until `optIn()`. After `optIn()`, the next
+  `setPushToken()` registers the token again. An app that opted out with 0.4.x
+  sends this identify once at the first start after the upgrade.
+- **`screen()` events carry the common automatic properties** (`app_version`,
+  `platform`, `sdk_name`, …), like `push_opened`. `app_version` and
+  `app_build` are also read when `trackAppLifecycleEvents` is off.
+- The test suite runs every case of whisperr-spec `automatic.json`.
+
 ## 0.4.0
 
 - **Push token kinds** (whisperr-spec `push.json` `kindCases`):

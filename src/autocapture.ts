@@ -15,6 +15,7 @@ export const APP_OPENED = "app_opened";
 export const APP_BACKGROUNDED = "app_backgrounded";
 export const SCREEN_VIEWED = "screen_viewed";
 export const PUSH_OPENED = "push_opened";
+export const PUSH_PERMISSION_CHANGED = "push_permission_changed";
 
 /**
  * The flat properties every automatic event carries (canonical values shared

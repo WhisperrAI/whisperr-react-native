@@ -194,10 +194,12 @@ export interface WhisperrApi {
    * Reports the OS notification permission. Safe to call on every launch and
    * every foreground: a repeated status is a no-op, also across restarts.
    *
-   * The status goes to the user as the trait `push_permission`. `denied` also
-   * opts out the push token this client registered, so the engine stops
-   * choosing push for this device; `granted` / `provisional` registers it again.
-   * Before identify() the status is attached to the next identify().
+   * A new status sends the event `push_permission_changed` with `status`
+   * (`authorized`, `provisional`, `denied`, `not_determined`) and
+   * `previous_status`, the last status sent from this device. Before
+   * identify() it goes out under the anonymous handle. `denied` also opts out
+   * the push token this client registered, so the engine stops choosing push
+   * for this device; `granted` / `provisional` registers it again.
    */
   setPushPermission(status: PushPermissionStatus): void;
   track(eventType: string, properties?: Record<string, unknown>, context?: Record<string, unknown>): void;
@@ -218,7 +220,17 @@ export interface WhisperrApi {
   trackPushOpened(data: unknown): WhisperrPushOpen | null;
   flush(): Promise<void>;
   reset(): void;
+  /** Resumes capture after optOut(). The next setPushToken() registers the token again. */
   optIn(): void;
+  /**
+   * Stops capture: the queue and any buffered push token are dropped, and
+   * nothing is queued or sent until optIn(). Persisted across restarts and
+   * reset(). When this device registered a push token, one identify opts that
+   * token out on the server first, under the user the token was registered
+   * for (not always the current user). Push opt-outs already queued are kept
+   * and go before it. Email, SMS, and the user's other devices keep their
+   * state.
+   */
   optOut(): void;
   /** Flushes, stops timers, and detaches listeners. The client is unusable afterward. */
   close(): Promise<void>;
