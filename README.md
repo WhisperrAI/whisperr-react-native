@@ -233,12 +233,15 @@ whisperr.setPushPermission("granted"); // "granted" | "provisional" | "denied" |
 
 ### Opt-out
 
-`optOut()` stops all capture until `optIn()`. When a user is known and this
-device registered a push token for them, the SDK first sends one identify
-that opts that token out, so Whisperr stops sending push to this device. The
-SDK retries that request like any other, also after a restart. Email, SMS,
-and the user's other devices keep their state, and data already sent is not
-deleted. After `optIn()`, call `setPushToken()` again to register the token.
+`optOut()` stops all capture until `optIn()`. When this device registered a
+push token, the SDK first sends one identify that opts that token out, so
+Whisperr stops sending push to this device. The identify goes to the user the
+token was registered for. After `identify()` without `reset()`, that is not
+always the current user. The SDK retries that request like any other, also
+after a restart. An app that opted out with SDK 0.4.x sends this request once
+at the first start after the upgrade. Email, SMS, and the user's other devices
+keep their state, and data already sent is not deleted. After `optIn()`, call
+`setPushToken()` again to register the token.
 
 ### Bare React Native with `@react-native-firebase/messaging`
 

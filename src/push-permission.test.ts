@@ -332,6 +332,29 @@ describe("optOut() opts this device's push token out on the server", () => {
     expect(events).toEqual([]);
   });
 
+  it("goes out under the user the token was registered for after a user switch", async () => {
+    const w = await registered();
+    w.identify("user_2");
+    await settle(w);
+    w.optOut();
+    await settle(w);
+    expect(identifies).toEqual([{ external_user_id: "user_2" }, OPT_OUT]);
+  });
+
+  it("is sent once at start by an install that opted out locally with a token still registered", async () => {
+    const storage = new MemoryStorage();
+    storage.setItem("whisperr.optout", "1");
+    storage.setItem("whisperr.last_push", JSON.stringify({ userId: "user_1", token: "fcm_tok_a" }));
+    const w = makeClient({ storage });
+    await settle(w);
+    await w.close();
+    expect(identifies).toEqual([OPT_OUT]);
+
+    const next = makeClient({ storage });
+    await settle(next);
+    expect(identifies).toEqual([OPT_OUT]);
+  });
+
   it("is not lost when optOut() runs while a batch is in flight", async () => {
     const w = await registered();
     let release!: () => void;

@@ -12,11 +12,14 @@
   under the anonymous id. `reset()` forgets the sent status. The SDK no longer
   writes the `push_permission` trait. The `PushPermissionStatus` type does not
   change. After an upgrade from 0.4.x, the first report sends the event once.
-- **`optOut()` tells the server about this device.** When a user is known and
-  this device registered a push token for them, it sends one identify that
-  opts the token out. The SDK delivers and retries it while opted out, also
-  after a restart. It then sends nothing until `optIn()`. After `optIn()`, the
-  next `setPushToken()` registers the token again.
+- **`optOut()` tells the server about this device.** When this device
+  registered a push token, it sends one identify that opts the token out,
+  under the user the token was registered for (after `identify()` without
+  `reset()`, not always the current user). The SDK delivers and retries it
+  while opted out, also after a restart. It then sends nothing until
+  `optIn()`. After `optIn()`, the next `setPushToken()` registers the token
+  again. An app that opted out with 0.4.x sends this identify once at the
+  first start after the upgrade.
 - **`screen()` events carry the common automatic properties** (`app_version`,
   `platform`, `sdk_name`, …), like `push_opened`. `app_version` and
   `app_build` are also read when `trackAppLifecycleEvents` is off.

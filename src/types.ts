@@ -225,9 +225,10 @@ export interface WhisperrApi {
   /**
    * Stops capture: the queue and any buffered push token are dropped, and
    * nothing is queued or sent until optIn(). Persisted across restarts and
-   * reset(). When a user is known and this device registered a push token for
-   * them, one identify opts that token out on the server first. Email, SMS,
-   * and the user's other devices keep their state.
+   * reset(). When this device registered a push token, one identify opts that
+   * token out on the server first, under the user the token was registered
+   * for (not always the current user). Email, SMS, and the user's other
+   * devices keep their state.
    */
   optOut(): void;
   /** Flushes, stops timers, and detaches listeners. The client is unusable afterward. */

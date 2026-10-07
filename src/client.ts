@@ -357,9 +357,8 @@ export class WhisperrClient implements WhisperrApi {
     this.pendingPushToken = null;
     this.queue.clear();
     void this.storage.set(OPTOUT_KEY, "1");
-    // The last-sent pair is restored by init.
+    // Before init the last-sent pair is not restored yet; init sends it.
     if (this.initialized) this.queuePushOptOut();
-    else void this.initPromise.then(() => this.queuePushOptOut());
   }
 
   async flush(): Promise<void> {
@@ -462,6 +461,8 @@ export class WhisperrClient implements WhisperrApi {
       // opt-out from the previous launch that has not reached the server.
       this.queue.retain((op) => op.kind === "identify" && op.optOut === true);
       this.pendingPushToken = null;
+      // SDK 0.4.x opted out locally only and kept the last-sent pair.
+      this.queuePushOptOut();
       this.initialized = true;
       return;
     }
@@ -570,20 +571,19 @@ export class WhisperrClient implements WhisperrApi {
   }
 
   /**
-   * optOut() tells the server about this device: when a user is known and
-   * this client registered a token for them, one partial identify opts that
-   * token out. It is the only op sent while opted out, and it survives a
-   * restart until delivered. The pair is forgotten, so after optIn() the next
-   * setPushToken() registers the token again.
+   * optOut() tells the server about this device: when this client holds a
+   * last-sent pair, one partial identify opts that token out under the pair's
+   * user, who is not always the current one (identify() without reset()). It
+   * survives a restart until delivered. The pair is forgotten, so after
+   * optIn() the next setPushToken() registers the token again.
    */
   private queuePushOptOut(): void {
-    const userId = this.userId;
     const last = this.lastPush;
+    if (!last) return;
     this.forgetLastPush();
-    if (this.closed || !this.optedOut || !userId || !last || last.userId !== userId) return;
     this.enqueue({
       kind: "identify",
-      externalUserId: userId,
+      externalUserId: last.userId,
       channels: [{ type: "push", address: last.token, optedIn: false }],
       occurredAt: nowISO(),
       optOut: true,
