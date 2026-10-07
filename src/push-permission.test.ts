@@ -15,19 +15,34 @@ const APNS = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
 const EXPO = "ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]";
 
 let identifies: any[] = [];
+let events: any[] = [];
 let status = 200;
 
 beforeEach(() => {
   identifies = [];
+  events = [];
   status = 200;
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string, init: any) => {
-      if (url.endsWith("/v1/identify")) identifies.push(JSON.parse(init.body));
-      return { ok: status < 300, status } as Response;
+      if (status >= 300) return { ok: false, status } as Response;
+      const body = JSON.parse(init.body);
+      if (url.endsWith("/v1/identify")) identifies.push(body);
+      if (url.endsWith("/v1/events/batch")) events.push(...body.events);
+      return { ok: true, status } as Response;
     }),
   );
 });
+
+/** The push_permission_changed events sent, as { status, previous_status? }. */
+function permissionEvents(): Array<Record<string, unknown>> {
+  return events
+    .filter((e) => e.event_type === "push_permission_changed")
+    .map(({ properties: { status, previous_status } }) => ({
+      status,
+      ...(previous_status ? { previous_status } : {}),
+    }));
+}
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -162,26 +177,36 @@ describe("setPushToken with metadata", () => {
 });
 
 describe("setPushPermission", () => {
-  it("sends the status as the push_permission trait, once", async () => {
-    const storage = new MemoryStorage();
-    const w = makeClient({ storage });
+  it("sends push_permission_changed with the spec status names, never a trait", async () => {
+    const w = makeClient();
     w.identify("user_1");
+    w.setPushPermission("undetermined");
     w.setPushPermission("granted");
     w.setPushPermission("granted");
     await settle(w);
-    await w.close();
-    expect(identifies.slice(1)).toEqual([{ external_user_id: "user_1", traits: { push_permission: "granted" } }]);
-
-    // Every-launch reports stay a no-op after a restart.
-    const again = makeClient({ storage });
-    again.identify("user_1");
-    again.setPushPermission("granted");
-    await settle(again);
-    await again.close();
-    expect(identifies.filter((b) => b.traits?.push_permission)).toHaveLength(1);
+    expect(permissionEvents()).toEqual([
+      { status: "not_determined" },
+      { status: "authorized", previous_status: "not_determined" },
+    ]);
+    const event = events.find((e) => e.event_type === "push_permission_changed");
+    expect(event.external_user_id).toBe("user_1");
+    expect(event.properties).toMatchObject({ platform: "ios", sdk_name: "whisperr-react-native" });
+    expect(identifies).toEqual([{ external_user_id: "user_1" }]);
   });
 
-  it("denied opts the registered token out and holds it; granted registers it again", async () => {
+  it("before identify(), the event goes out under the anonymous handle", async () => {
+    const w = makeClient();
+    w.setPushPermission("denied");
+    await settle(w);
+    expect(permissionEvents()).toEqual([{ status: "denied" }]);
+    expect(events[0].external_user_id).toBeUndefined();
+    expect(events[0].anonymous_id).toBeTruthy();
+    w.identify("user_1");
+    await settle(w);
+    expect(identifies[0].traits).toBeUndefined();
+  });
+
+  it("denied opts the registered token out and holds it; provisional registers it again", async () => {
     const w = makeClient();
     w.identify("user_1");
     w.setPushToken({ token: EXPO });
@@ -192,11 +217,7 @@ describe("setPushPermission", () => {
     w.setPushPermission("denied");
     await settle(w);
     expect(identifies).toEqual([
-      {
-        external_user_id: "user_1",
-        traits: { push_permission: "denied" },
-        channels: [{ channel: "push", address: EXPO, opted_in: false }],
-      },
+      { external_user_id: "user_1", channels: [{ channel: "push", address: EXPO, opted_in: false }] },
     ]);
 
     // Every-launch token wiring while notifications are off: nothing is sent.
@@ -212,46 +233,62 @@ describe("setPushPermission", () => {
     expect(identifies).toEqual([
       {
         external_user_id: "user_1",
-        traits: { push_permission: "provisional" },
         channels: [{ channel: "push", address: EXPO, opted_in: true, kind: "expo", platform: "ios" }],
       },
     ]);
+    expect(permissionEvents().slice(1)).toEqual([
+      { status: "denied", previous_status: "authorized" },
+      { status: "provisional", previous_status: "denied" },
+    ]);
   });
 
-  it("before identify(), the status rides on the next identify; the caller's trait wins", async () => {
+  it("reset() forgets the sent status but keeps the device's denied permission", async () => {
     const w = makeClient();
+    w.identify("user_1");
     w.setPushPermission("denied");
-    await settle(w);
-    w.identify("user_1");
-    w.identify("user_2", { traits: { push_permission: "custom" } });
-    await settle(w);
-    expect(identifies[0]).toEqual({ external_user_id: "user_1", traits: { push_permission: "denied" } });
-    expect(identifies[1].traits).toEqual({ push_permission: "custom" });
-  });
-
-  it("after reset(), the next user gets the device's status", async () => {
-    const w = makeClient();
-    w.identify("user_1");
-    w.setPushPermission("granted");
     await settle(w);
     w.reset();
     w.identify("user_2");
+    w.setPushToken("fcm_tok_a"); // held: notifications are still off on this device
+    w.setPushPermission("denied");
     await settle(w);
-    expect(identifies.at(-1)).toEqual({ external_user_id: "user_2", traits: { push_permission: "granted" } });
+    expect(permissionEvents()).toEqual([{ status: "denied" }, { status: "denied" }]);
+    expect(identifies.filter((b) => b.channels)).toEqual([]);
   });
 
-  it("a report the server rejected is sent again on the next report", async () => {
+  it("an upgrade from 0.4.x sends the stored status once, and keeps its denied gate", async () => {
+    const storage = new MemoryStorage();
+    storage.setItem("whisperr.user_id", "user_1");
+    storage.setItem("whisperr.push_permission", JSON.stringify({ status: "denied", sentFor: "user_1" }));
+    const w = makeClient({ storage });
+    w.setPushToken("fcm_tok_a");
+    await settle(w);
+    expect(identifies).toEqual([]); // held back by the stored denied permission
+
+    w.setPushPermission("denied");
+    w.setPushPermission("denied");
+    await settle(w);
+    await w.close();
+    expect(permissionEvents()).toEqual([{ status: "denied" }]);
+
+    const again = makeClient({ storage });
+    again.setPushPermission("denied");
+    await settle(again);
+    expect(permissionEvents()).toHaveLength(1);
+  });
+
+  it("an event the server rejected is sent again on the next report, with the status before it", async () => {
     const w = makeClient();
     w.identify("user_1");
+    w.setPushPermission("granted");
     await settle(w);
     status = 400;
-    w.setPushPermission("granted");
+    w.setPushPermission("denied");
     await settle(w);
     status = 200;
-    identifies = [];
-    w.setPushPermission("granted");
+    w.setPushPermission("denied");
     await settle(w);
-    expect(identifies).toEqual([{ external_user_id: "user_1", traits: { push_permission: "granted" } }]);
+    expect(permissionEvents()).toEqual([{ status: "authorized" }, { status: "denied", previous_status: "authorized" }]);
   });
 
   it("ignores an unknown status", async () => {
@@ -260,5 +297,60 @@ describe("setPushPermission", () => {
     w.setPushPermission("maybe" as never);
     await settle(w);
     expect(identifies).toHaveLength(1);
+    expect(events).toEqual([]);
+  });
+});
+
+describe("optOut() opts this device's push token out on the server", () => {
+  async function registered(storage = new MemoryStorage()): Promise<WhisperrClient> {
+    const w = makeClient({ storage });
+    w.identify("user_1");
+    w.setPushToken("fcm_tok_a");
+    await settle(w);
+    identifies = [];
+    return w;
+  }
+  const OPT_OUT = { external_user_id: "user_1", channels: [{ channel: "push", address: "fcm_tok_a", opted_in: false }] };
+
+  it("retries the opt-out while opted out and delivers it after a restart", async () => {
+    const storage = new MemoryStorage();
+    const w = await registered(storage);
+    status = 503;
+    w.optOut();
+    w.optOut(); // a second call keeps the queued opt-out
+    w.track("feature_used");
+    await settle(w);
+    await w.close();
+    expect(identifies).toEqual([]);
+
+    status = 200;
+    const next = makeClient({ storage });
+    next.identify("user_1");
+    next.track("feature_used");
+    await settle(next);
+    expect(identifies).toEqual([OPT_OUT]);
+    expect(events).toEqual([]);
+  });
+
+  it("is not lost when optOut() runs while a batch is in flight", async () => {
+    const w = await registered();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init: any) => {
+        if (url.endsWith("/v1/events/batch")) await gate;
+        if (url.endsWith("/v1/identify")) identifies.push(JSON.parse(init.body));
+        return { ok: true, status: 200 } as Response;
+      }),
+    );
+    w.track("feature_used");
+    const inFlight = w.flush();
+    await new Promise((r) => setTimeout(r, 0));
+    w.optOut();
+    release();
+    await inFlight;
+    await w.flush();
+    expect(identifies).toEqual([OPT_OUT]);
   });
 });

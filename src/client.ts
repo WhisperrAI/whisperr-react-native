@@ -9,16 +9,20 @@ import {
   extractPushOpened,
   parseStoredAppVersion,
   PUSH_OPENED,
+  PUSH_PERMISSION_CHANGED,
   SCREEN_VIEWED,
 } from "./autocapture.js";
 import { deviceTraits } from "./device.js";
 import { currentAppState, currentOS, onAppStateChange, type AppStateStatus } from "./lifecycle.js";
 import {
   isPushPermissionStatus,
+  isPushPermissionWireStatus,
   normalizePushToken,
+  PERMISSION_WIRE_STATUS,
   permissionAllowsPush,
   pushChannel,
   pushMeta,
+  type PushPermissionWireStatus,
   type PushRegistration,
 } from "./push.js";
 import { DurableQueue } from "./queue.js";
@@ -51,10 +55,8 @@ const ANON_USED_KEY = "whisperr.anon_used";
 const APP_VERSION_KEY = "whisperr.app_version";
 /** whisperr_message_ids already reported as push_opened (most recent last). */
 const PUSH_OPENED_KEY = "whisperr.push_opened";
-/** The last notification permission reported, and the user it was sent for. */
+/** The device's notification permission (a PermissionRecord). */
 const PERMISSION_KEY = "whisperr.push_permission";
-/** The trait that carries the notification permission. */
-const PERMISSION_TRAIT = "push_permission";
 const MAX_REMEMBERED_PUSH_OPENS = 100;
 /**
  * Every key an SDK version before lifecycle events (0.2.x) could have
@@ -105,11 +107,10 @@ export class WhisperrClient implements WhisperrApi {
    * the stale token.
    */
   private lastPush: { userId: string; token: string; meta?: string } | null = null;
-  /** The notification permission last reported through setPushPermission(). */
-  private permission: PushPermissionStatus | null = null;
-  /** The user the current permission status was sent for (null: not sent yet). */
-  private permissionSentFor: string | null = null;
-  private muted: boolean; // opted out / disabled — capture is a no-op
+  /** The device's notification permission; null until the app reports one. */
+  private permission: PermissionRecord | null = null;
+  /** optOut() ran (persisted as OPTOUT_KEY). Only the push opt-out op it queued is sent. */
+  private optedOut = false;
   private closed = false;
   /** identify()/reset() ran before init resolved — don't adopt the persisted user. */
   private identityTouched = false;
@@ -145,11 +146,12 @@ export class WhisperrClient implements WhisperrApi {
     this.debug = options.debug ?? false;
     this.onError = options.onError;
     this.disabled = !!options.disabled;
-    this.muted = this.disabled;
     this.autocapture = !this.disabled && (options.trackAppLifecycleEvents ?? true);
     this.flushOnBackground = options.flushOnAppBackground ?? true;
     this.durableStorage = !!options.storage;
-    this.appInfo = this.autocapture ? resolveAppInfo({ version: options.appVersion, build: options.appBuild }) : {};
+    // Manual screen(), push_opened and push_permission_changed carry these
+    // too, so they resolve even with the automatic events off.
+    this.appInfo = this.disabled ? {} : resolveAppInfo({ version: options.appVersion, build: options.appBuild });
 
     if (!options.storage) {
       this.log("no `storage` provided — the queue is memory-only. Pass AsyncStorage to survive app restarts.");
@@ -176,15 +178,21 @@ export class WhisperrClient implements WhisperrApi {
       if (this.autocapture || this.flushOnBackground) {
         this.removeLifecycle = onAppStateChange((state) => this.handleAppState(state));
       }
-      // Drain anything left over from a previous launch.
+      // Drain anything left over from a previous launch (while opted out:
+      // a push opt-out that did not reach the server yet).
       void this.initPromise.then(() => {
-        if (!this.muted && !this.closed && this.queue.size > 0) void this.flush();
+        if (!this.closed && this.queue.size > 0) void this.flush();
       });
     }
   }
 
   get ready(): boolean {
     return !this.muted && !this.closed;
+  }
+
+  /** Opted out or disabled: capture is a no-op. */
+  private get muted(): boolean {
+    return this.disabled || this.optedOut;
   }
 
   get pendingCount(): number {
@@ -201,7 +209,7 @@ export class WhisperrClient implements WhisperrApi {
     // differs from the last token this client sent for this user, opt the old
     // one out in the same body so it isn't stranded opted-in.
     // A token held back while notifications are denied stays held back.
-    const pending = this.permission === "denied" ? null : this.pendingPushToken;
+    const pending = this.permission?.status === "denied" ? null : this.pendingPushToken;
     const channels = this.withPushRotation(externalUserId, buildChannels(params, pending));
     // Mark the last-sent pair BEFORE enqueue so an overflow-evicted registration
     // clears the mark (mark-on-delivery), never stranding a token opted-out.
@@ -223,7 +231,7 @@ export class WhisperrClient implements WhisperrApi {
       externalUserId,
       ...(anonymousId ? { anonymousId } : {}),
       ...(resolveAnonymous ? { resolveAnonymous } : {}),
-      traits: this.withPermissionTrait(externalUserId, withDeviceTraits(params.traits)),
+      traits: withDeviceTraits(params.traits),
       preferredChannel: params.preferredChannel,
       channels,
       occurredAt: nowISO(),
@@ -246,8 +254,8 @@ export class WhisperrClient implements WhisperrApi {
       this.log(`setPushPermission(): unknown status "${String(status)}" — ignored`);
       return;
     }
-    // Decide after init: the persisted status (and the user it was sent for)
-    // makes a repeated report a no-op across restarts.
+    // Decide after init: the persisted record makes a repeated report a no-op
+    // across restarts.
     if (this.initialized) this.applyPermission(status);
     else void this.initPromise.then(() => this.applyPermission(status));
   }
@@ -270,7 +278,7 @@ export class WhisperrClient implements WhisperrApi {
       this.log("screen() needs a screen name — event was not queued");
       return;
     }
-    this.track(SCREEN_VIEWED, { ...properties, screen_name: screenName });
+    this.track(SCREEN_VIEWED, { ...automaticProperties(this.appInfo), ...properties, screen_name: screenName });
   }
 
   trackPushOpened(data: unknown): WhisperrPushOpen | null {
@@ -327,8 +335,9 @@ export class WhisperrClient implements WhisperrApi {
     this.userId = null;
     this.pendingPushToken = null;
     this.lastPush = null;
-    // The device permission stays; the next user gets it with their identify.
-    this.setPermissionState(this.permission, null);
+    // The next user gets a fresh push_permission_changed. The permission itself
+    // is the device's, so a denied permission still holds tokens back.
+    if (this.permission) this.setPermission({ status: this.permission.status });
     this.anonId = uuid(); // fresh anonymous identity (a UUID v4, per the spec)
     this.setAnonUsed(false);
     void this.storage.remove(USER_KEY);
@@ -338,19 +347,23 @@ export class WhisperrClient implements WhisperrApi {
 
   optIn(): void {
     if (this.closed || this.disabled) return; // `disabled` is a hard off switch
-    this.muted = false;
+    this.optedOut = false;
     void this.storage.remove(OPTOUT_KEY);
   }
 
   optOut(): void {
-    this.muted = true;
+    if (this.closed || this.optedOut) return; // a second call must not drop the queued opt-out
+    this.optedOut = true;
     this.pendingPushToken = null;
     this.queue.clear();
     void this.storage.set(OPTOUT_KEY, "1");
+    // The last-sent pair is restored by init.
+    if (this.initialized) this.queuePushOptOut();
+    else void this.initPromise.then(() => this.queuePushOptOut());
   }
 
   async flush(): Promise<void> {
-    if (this.muted || this.closed) return;
+    if (this.closed) return;
     // Serialize drains and guarantee that awaiting flush() waits for a drain
     // pass that runs AFTER this call — so `await whisperr.flush()` before logout
     // actually delivers everything queued, even if a background flush is mid-send.
@@ -375,7 +388,7 @@ export class WhisperrClient implements WhisperrApi {
 
   private async init(): Promise<void> {
     this.hadPriorState = await this.priorState;
-    const optedOut = !!(await this.storage.get(OPTOUT_KEY));
+    if (await this.storage.get(OPTOUT_KEY)) this.optedOut = true;
 
     const anon = await this.storage.get(ANON_KEY);
     const persistedUser = await this.storage.get(USER_KEY);
@@ -422,17 +435,11 @@ export class WhisperrClient implements WhisperrApi {
 
     // The permission is reported through setPushPermission(), which waits for
     // init, so the stored value is always the latest one at this point.
-    const rawPermission = await this.storage.get(PERMISSION_KEY);
-    if (rawPermission) {
-      try {
-        const parsed = JSON.parse(rawPermission) as { status?: unknown; sentFor?: unknown };
-        if (isPushPermissionStatus(parsed.status) && this.permission === null) {
-          this.permission = parsed.status;
-          this.permissionSentFor = typeof parsed.sentFor === "string" ? parsed.sentFor : null;
-        }
-      } catch {
-        /* corrupt payload — discard */
-      }
+    const storedPermission = parsePermissionRecord(await this.storage.get(PERMISSION_KEY));
+    if (storedPermission) {
+      // reset() before init: the next report is a fresh one.
+      if (this.pushCleared) this.setPermission({ status: storedPermission.status });
+      else this.permission = storedPermission;
     }
 
     const rawOpened = await this.storage.get(PUSH_OPENED_KEY);
@@ -450,9 +457,11 @@ export class WhisperrClient implements WhisperrApi {
     await this.session.restore();
     await this.queue.restore();
 
-    if (optedOut) {
-      this.muted = true;
-      this.queue.clear(); // drop anything captured before the opt-out was read
+    if (this.optedOut) {
+      // Drop anything captured before the opt-out was read; keep a push
+      // opt-out from the previous launch that has not reached the server.
+      this.queue.retain((op) => op.kind === "identify" && op.optOut === true);
+      this.pendingPushToken = null;
       this.initialized = true;
       return;
     }
@@ -480,7 +489,7 @@ export class WhisperrClient implements WhisperrApi {
     // Held, not sent: before init (the restored last-sent pair and permission
     // decide it then), before we know the user (the next identify() takes it),
     // and while notifications are off (the next allowed report sends it).
-    if (!this.initialized || !this.userId || this.permission === "denied") {
+    if (!this.initialized || !this.userId || this.permission?.status === "denied") {
       this.pendingPushToken = reg;
       return;
     }
@@ -507,64 +516,79 @@ export class WhisperrClient implements WhisperrApi {
 
   private applyPermission(status: PushPermissionStatus): void {
     if (this.muted || this.closed) return;
-    const changed = this.permission !== status;
+    const wire = PERMISSION_WIRE_STATUS[status];
+    const previous = this.permission?.sent;
+    if (previous === wire && this.permission?.status === status) return; // every-launch / every-foreground report
+    // Mark BEFORE enqueue so a dropped or evicted event clears the mark.
+    this.setPermission({ status, sent: wire });
+    if (previous !== wire) {
+      this.enqueueTrack(
+        PUSH_PERMISSION_CHANGED,
+        {
+          ...automaticProperties(this.appInfo),
+          status: wire,
+          ...(previous ? { previous_status: previous } : {}),
+        },
+        undefined,
+        nowISO(),
+      );
+    }
     const userId = this.userId;
-    if (!userId) {
-      // Sent with the next identify().
-      if (changed) this.setPermissionState(status, null);
-      return;
+    const channels = userId ? this.permissionChannels(status, userId) : [];
+    if (userId && channels.length) {
+      this.enqueue({ kind: "identify", externalUserId: userId, channels, occurredAt: nowISO() });
     }
-    if (!changed && this.permissionSentFor === userId) return; // every-launch / every-foreground report
-    const channels: WhisperrChannel[] = [];
-    if (status === "denied") {
-      // Stop push to this device: opt the registered token out, and hold it so
-      // it registers again as soon as the permission comes back.
-      const last = this.lastPush && this.lastPush.userId === userId ? this.lastPush : null;
-      if (last) {
-        channels.push({ type: "push", address: last.token, optedIn: false });
-        if (!this.pendingPushToken) this.pendingPushToken = registrationFromMeta(last.token, last.meta);
-        this.lastPush = null;
-        void this.storage.remove(PUSH_KEY);
-      }
-    } else if (permissionAllowsPush(status) && this.pendingPushToken) {
-      const reg = this.pendingPushToken;
-      this.pendingPushToken = null;
-      const last = this.lastPush && this.lastPush.userId === userId ? this.lastPush : null;
-      if (last && last.token !== reg.token) channels.push({ type: "push", address: last.token, optedIn: false });
-      if (!last || last.token !== reg.token) {
-        channels.push(pushChannel(reg, true));
-        this.setLastPush(userId, reg.token, pushMeta(reg) || undefined);
-      }
-    }
-    // Mark BEFORE enqueue so a dropped or evicted report clears the mark.
-    this.setPermissionState(status, userId);
-    this.enqueue({
-      kind: "identify",
-      externalUserId: userId,
-      traits: { [PERMISSION_TRAIT]: status },
-      ...(channels.length ? { channels } : {}),
-      occurredAt: nowISO(),
-    });
     void this.flush();
   }
 
-  /** Adds `push_permission` to a full identify when this user has not received the current status yet. */
-  private withPermissionTrait(
-    userId: string,
-    traits: Record<string, unknown> | undefined,
-  ): Record<string, unknown> | undefined {
-    if (!this.initialized || this.permission === null) return traits;
-    if (traits && PERMISSION_TRAIT in traits) return traits; // the caller's value wins
-    if (this.permissionSentFor === userId) return traits;
-    this.setPermissionState(this.permission, userId);
-    return { ...traits, [PERMISSION_TRAIT]: this.permission };
+  /**
+   * The push channel changes a permission report causes: `denied` opts the
+   * registered token out and holds it; an allowed status registers a held token.
+   */
+  private permissionChannels(status: PushPermissionStatus, userId: string): WhisperrChannel[] {
+    const last = this.lastPush && this.lastPush.userId === userId ? this.lastPush : null;
+    if (status === "denied") {
+      if (!last) return [];
+      if (!this.pendingPushToken) this.pendingPushToken = registrationFromMeta(last.token, last.meta);
+      this.forgetLastPush();
+      return [{ type: "push", address: last.token, optedIn: false }];
+    }
+    if (!permissionAllowsPush(status) || !this.pendingPushToken) return [];
+    const reg = this.pendingPushToken;
+    this.pendingPushToken = null;
+    if (last && last.token === reg.token) return [];
+    const channels: WhisperrChannel[] = [];
+    if (last) channels.push({ type: "push", address: last.token, optedIn: false });
+    channels.push(pushChannel(reg, true));
+    this.setLastPush(userId, reg.token, pushMeta(reg) || undefined);
+    return channels;
   }
 
-  private setPermissionState(status: PushPermissionStatus | null, sentFor: string | null): void {
-    this.permission = status;
-    this.permissionSentFor = status === null ? null : sentFor;
-    if (status === null) return;
-    void this.storage.set(PERMISSION_KEY, JSON.stringify({ status, ...(sentFor ? { sentFor } : {}) }));
+  private setPermission(record: PermissionRecord): void {
+    this.permission = record;
+    void this.storage.set(PERMISSION_KEY, JSON.stringify(record));
+  }
+
+  /**
+   * optOut() tells the server about this device: when a user is known and
+   * this client registered a token for them, one partial identify opts that
+   * token out. It is the only op sent while opted out, and it survives a
+   * restart until delivered. The pair is forgotten, so after optIn() the next
+   * setPushToken() registers the token again.
+   */
+  private queuePushOptOut(): void {
+    const userId = this.userId;
+    const last = this.lastPush;
+    this.forgetLastPush();
+    if (this.closed || !this.optedOut || !userId || !last || last.userId !== userId) return;
+    this.enqueue({
+      kind: "identify",
+      externalUserId: userId,
+      channels: [{ type: "push", address: last.token, optedIn: false }],
+      occurredAt: nowISO(),
+      optOut: true,
+    });
+    void this.flush();
   }
 
   // ---- automatic lifecycle events ----
@@ -700,17 +724,14 @@ export class WhisperrClient implements WhisperrApi {
    * currently-marked token.
    */
   private forgetPushMark(discarded: readonly QueuedOp[]): void {
-    // A permission report that never shipped must re-send on the next report.
-    if (
-      this.permissionSentFor &&
-      discarded.some(
-        (op) =>
-          op.kind === "identify" &&
-          op.externalUserId === this.permissionSentFor &&
-          op.traits?.[PERMISSION_TRAIT] === this.permission,
-      )
-    ) {
-      this.setPermissionState(this.permission, null);
+    // A permission event that never shipped: the last status sent is the one before it.
+    const permission = this.permission;
+    const lost = discarded.find(
+      (op) => op.kind === "track" && op.eventType === PUSH_PERMISSION_CHANGED && op.properties?.status === permission?.sent,
+    );
+    if (permission?.sent && lost?.kind === "track") {
+      const before = lost.properties?.previous_status;
+      this.setPermission({ status: permission.status, ...(isPushPermissionWireStatus(before) ? { sent: before } : {}) });
     }
     const last = this.lastPush;
     if (!last) return;
@@ -720,8 +741,7 @@ export class WhisperrClient implements WhisperrApi {
         (c) => c.type === "push" && c.optedIn !== false && c.address === last.token,
       );
       if (carried) {
-        this.lastPush = null;
-        void this.storage.remove(PUSH_KEY);
+        this.forgetLastPush();
         return;
       }
     }
@@ -733,9 +753,14 @@ export class WhisperrClient implements WhisperrApi {
     void this.storage.set(PUSH_KEY, JSON.stringify(this.lastPush));
   }
 
+  private forgetLastPush(): void {
+    this.lastPush = null;
+    void this.storage.remove(PUSH_KEY);
+  }
+
+  /** Sends the queue in order. While opted out it holds only the push opt-out op. */
   private async drain(): Promise<void> {
     await this.initPromise;
-    if (this.muted) return;
 
     let retries = 0;
     while (this.queue.size > 0) {
@@ -758,6 +783,8 @@ export class WhisperrClient implements WhisperrApi {
         count = batch.length;
       }
       const { result } = outcome;
+      // optOut() replaced the queue while this request was in flight.
+      if (this.queue.all[0] !== front) continue;
 
       if (result === "ok") {
         this.queue.removeFront(count);
@@ -834,6 +861,31 @@ export class WhisperrClient implements WhisperrApi {
       // eslint-disable-next-line no-console
       console.warn(`[whisperr] ${message}`);
     }
+  }
+}
+
+/**
+ * The device's notification permission, persisted under PERMISSION_KEY.
+ * `status` is the last one the app reported; it holds push tokens back while
+ * `denied`. `sent` is the last status sent as push_permission_changed from
+ * this device: a report sends the event only when it differs, and reset()
+ * clears it.
+ */
+interface PermissionRecord {
+  status: PushPermissionStatus;
+  sent?: PushPermissionWireStatus;
+}
+
+/** SDK 0.4.x stored `{ status, sentFor }` and never sent the event, so it parses as not sent. */
+function parsePermissionRecord(raw: string | null): PermissionRecord | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as { status?: unknown; sent?: unknown };
+    if (!isPushPermissionStatus(parsed.status)) return null;
+    const sent = isPushPermissionWireStatus(parsed.sent) ? { sent: parsed.sent } : {};
+    return { status: parsed.status, ...sent };
+  } catch {
+    return null; // corrupt payload — discard
   }
 }
 

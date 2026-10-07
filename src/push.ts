@@ -42,6 +42,20 @@ export function isPushPermissionStatus(value: unknown): value is PushPermissionS
   return typeof value === "string" && PERMISSIONS.has(value);
 }
 
+/** A notification permission as `push_permission_changed` sends it (whisperr-spec → Automatic events). */
+export type PushPermissionWireStatus = "authorized" | "provisional" | "denied" | "not_determined";
+
+export const PERMISSION_WIRE_STATUS: Readonly<Record<PushPermissionStatus, PushPermissionWireStatus>> = {
+  granted: "authorized",
+  provisional: "provisional",
+  denied: "denied",
+  undetermined: "not_determined",
+};
+
+export function isPushPermissionWireStatus(value: unknown): value is PushPermissionWireStatus {
+  return Object.values(PERMISSION_WIRE_STATUS).includes(value as PushPermissionWireStatus);
+}
+
 /** True when the OS shows (or quietly delivers) this app's notifications. */
 export function permissionAllowsPush(status: PushPermissionStatus | null): boolean {
   return status === "granted" || status === "provisional";

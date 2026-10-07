@@ -137,6 +137,12 @@ export class DurableQueue {
     this.schedulePersist();
   }
 
+  /** Keeps only the ops `keep` accepts. */
+  retain(keep: (op: QueuedOp) => boolean): void {
+    this.ops = this.ops.filter(keep);
+    this.schedulePersist();
+  }
+
   /** Resolves when every scheduled persist has been written. */
   settle(): Promise<void> {
     return this.persistChain;

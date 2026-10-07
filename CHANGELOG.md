@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+- **`setPushPermission(status)` sends the event `push_permission_changed`**
+  (whisperr-spec `automatic.json`) instead of the trait `push_permission`. The
+  engine reads only the event, so "notifications turned off after a push" is
+  now visible for React Native apps. `status` uses the spec names
+  (`granted` → `authorized`, `undetermined` → `not_determined`) and
+  `previous_status` carries the last status sent from this device. The event
+  is sent once per change, also across restarts; before login it goes out
+  under the anonymous id. `reset()` forgets the sent status. The SDK no longer
+  writes the `push_permission` trait. The `PushPermissionStatus` type does not
+  change. After an upgrade from 0.4.x, the first report sends the event once.
+- **`optOut()` tells the server about this device.** When a user is known and
+  this device registered a push token for them, it sends one identify that
+  opts the token out. The SDK delivers and retries it while opted out, also
+  after a restart. It then sends nothing until `optIn()`. After `optIn()`, the
+  next `setPushToken()` registers the token again.
+- **`screen()` events carry the common automatic properties** (`app_version`,
+  `platform`, `sdk_name`, …), like `push_opened`. `app_version` and
+  `app_build` are also read when `trackAppLifecycleEvents` is off.
+- The test suite runs every case of whisperr-spec `automatic.json`.
+
 ## 0.4.0
 
 - **Push token kinds** (whisperr-spec `push.json` `kindCases`):

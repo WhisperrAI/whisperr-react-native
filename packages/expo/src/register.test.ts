@@ -8,10 +8,12 @@ import { registerForPushNotifications, stopPushNotificationUpdates, toPermission
 const EXPO = "ExponentPushToken[aaaaaaaaaaaaaaaaaaaaaa]";
 
 let identifies: any[] = [];
+let events: any[] = [];
 
 beforeEach(() => {
   fake.reset();
   identifies = [];
+  events = [];
   __setPlatform({ OS: "ios", Version: "18.2" });
   Constants.executionEnvironment = ExecutionEnvironment.Standalone;
   Constants.expoConfig = { extra: { eas: { projectId: "proj-123" } } };
@@ -20,6 +22,7 @@ beforeEach(() => {
     "fetch",
     vi.fn(async (url: string, init: any) => {
       if (url.endsWith("/v1/identify")) identifies.push(JSON.parse(init.body));
+      if (url.endsWith("/v1/events/batch")) events.push(...JSON.parse(init.body).events);
       return { ok: true, status: 200 } as Response;
     }),
   );
@@ -54,6 +57,16 @@ function reports(): any[] {
   return identifies.slice(1);
 }
 
+/** The push_permission_changed events sent, as { status, previous_status? }. */
+function permissionEvents(): Array<Record<string, unknown>> {
+  return events
+    .filter((e) => e.event_type === "push_permission_changed")
+    .map(({ properties: { status, previous_status } }) => ({
+      status,
+      ...(previous_status ? { previous_status } : {}),
+    }));
+}
+
 describe("registerForPushNotifications", () => {
   it("asks, then sends the permission and the Expo token with kind expo", async () => {
     const client = await makeClient();
@@ -63,8 +76,8 @@ describe("registerForPushNotifications", () => {
     expect(result).toEqual({ status: "granted", token: EXPO });
     expect(fake.requestCalls).toEqual([{ ios: { allowAlert: true, allowBadge: true, allowSound: true } }]);
     expect(fake.tokenCalls).toEqual([{ projectId: "proj-123" }]);
+    expect(permissionEvents()).toEqual([{ status: "authorized" }]);
     expect(reports()).toEqual([
-      { external_user_id: "user_1", traits: { push_permission: "granted" } },
       {
         external_user_id: "user_1",
         channels: [{ channel: "push", address: EXPO, opted_in: true, kind: "expo", platform: "ios" }],
@@ -79,7 +92,8 @@ describe("registerForPushNotifications", () => {
     expect(result).toEqual({ status: "undetermined", token: null, reason: "permission_undetermined" });
     expect(fake.requestCalls).toHaveLength(0);
     expect(fake.tokenCalls).toHaveLength(0);
-    expect(reports()).toEqual([{ external_user_id: "user_1", traits: { push_permission: "undetermined" } }]);
+    expect(permissionEvents()).toEqual([{ status: "not_determined" }]);
+    expect(reports()).toEqual([]);
   });
 
   it("reports a denial and asks for no token", async () => {
@@ -89,7 +103,8 @@ describe("registerForPushNotifications", () => {
     await settle(client);
     expect(result).toEqual({ status: "denied", token: null, reason: "permission_denied" });
     expect(fake.requestCalls).toHaveLength(0);
-    expect(reports()).toEqual([{ external_user_id: "user_1", traits: { push_permission: "denied" } }]);
+    expect(permissionEvents()).toEqual([{ status: "denied" }]);
+    expect(reports()).toEqual([]);
   });
 
   it("creates the Android channel before the prompt (Android 13+)", async () => {
@@ -148,11 +163,7 @@ describe("registerForPushNotifications", () => {
     __setAppState("active");
     await settle(client);
     expect(reports()).toEqual([
-      {
-        external_user_id: "user_1",
-        traits: { push_permission: "denied" },
-        channels: [{ channel: "push", address: EXPO, opted_in: false }],
-      },
+      { external_user_id: "user_1", channels: [{ channel: "push", address: EXPO, opted_in: false }] },
     ]);
 
     identifies = identifies.slice(0, 1);
@@ -163,9 +174,13 @@ describe("registerForPushNotifications", () => {
     expect(reports()).toEqual([
       {
         external_user_id: "user_1",
-        traits: { push_permission: "granted" },
         channels: [{ channel: "push", address: EXPO, opted_in: true, kind: "expo", platform: "ios" }],
       },
+    ]);
+    expect(permissionEvents()).toEqual([
+      { status: "authorized" },
+      { status: "denied", previous_status: "authorized" },
+      { status: "authorized", previous_status: "denied" },
     ]);
   });
 
@@ -211,7 +226,7 @@ describe("registerForPushNotifications", () => {
     fake.permissions = perm("denied");
     __setAppState("active");
     await settle(client);
-    expect(reports().some((b) => b.traits?.push_permission === "denied")).toBe(false);
+    expect(permissionEvents().some((e) => e.status === "denied")).toBe(false);
   });
 });
 

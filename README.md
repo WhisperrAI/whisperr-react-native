@@ -35,7 +35,8 @@ whisperr.reset();
   automatic flush when the app backgrounds, batching, retry/backoff, and a
   stable `$message_id` per event so the backend dedups at-least-once retries.
 - **Consent-friendly** — `optIn()` / `optOut()` persist across launches and
-  stop all capture, automatic events included.
+  stop all capture, automatic events included. `optOut()` also opts this
+  device's push token out on the server.
 - **Push-ready** — token kinds (Expo, FCM, APNs), permission state, and
   notification-open tracking with deep links. Expo apps get it in one call with
   [`@whisperr/expo`](packages/expo/README.md).
@@ -218,11 +219,26 @@ the foreground. A repeated status is a no-op.
 whisperr.setPushPermission("granted"); // "granted" | "provisional" | "denied" | "undetermined"
 ```
 
-- The user gets the trait `push_permission`.
+- A new status sends the event `push_permission_changed`. Its `status` uses
+  the spec names: `granted` → `authorized`, `undetermined` →
+  `not_determined`; `provisional` and `denied` stay the same.
+  `previous_status` is the last status sent from this device. The SDK stores
+  that status, so a repeated report sends nothing, also after a restart.
+  `reset()` forgets it, so the next user gets a fresh report.
+- Before login, the event goes out under the anonymous id.
 - `denied` opts this device's token out, so the engine does not choose push
   for it. While the status is `denied`, `setPushToken()` holds the token back.
   When you report `granted` or `provisional` again, the SDK registers it again.
-- Before login, the status goes with the next `identify()`.
+- While opted out, the SDK sends nothing and keeps the stored status.
+
+### Opt-out
+
+`optOut()` stops all capture until `optIn()`. When a user is known and this
+device registered a push token for them, the SDK first sends one identify
+that opts that token out, so Whisperr stops sending push to this device. The
+SDK retries that request like any other, also after a restart. Email, SMS,
+and the user's other devices keep their state, and data already sent is not
+deleted. After `optIn()`, call `setPushToken()` again to register the token.
 
 ### Bare React Native with `@react-native-firebase/messaging`
 

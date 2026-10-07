@@ -23,7 +23,9 @@ type Step =
   | { identify: { externalUserId: string; [k: string]: unknown } }
   | { setPushToken: string | { token: string; kind?: string; platform?: string; pushEnv?: string } }
   | { restart: boolean }
-  | { reset: boolean };
+  | { reset: boolean }
+  | { optOut: boolean }
+  | { optIn: boolean };
 
 interface PushCase {
   name: string;
@@ -94,7 +96,13 @@ async function runCases(cases: PushCase[]): Promise<void> {
       } else if ("reset" in step) {
         w.reset();
         await w.flush();
-      } else {
+      } else if ("optOut" in step) {
+        w.optOut();
+        await w.flush();
+      } else if ("optIn" in step) {
+        w.optIn();
+        await w.flush();
+      } else if ("restart" in step) {
         // restart: tear down the client, construct a fresh one on the same
         // storage. Do NOT drain init here — real apps call identify() /
         // setPushToken() in the launch tick, before the async restore
@@ -103,6 +111,8 @@ async function runCases(cases: PushCase[]): Promise<void> {
         // skips restoring the persisted push pair once identify() has run.
         await w.close();
         w = makeClient();
+      } else {
+        throw new Error(`${c.name}: unknown step ${JSON.stringify(step)}`);
       }
     }
     await w.close();
