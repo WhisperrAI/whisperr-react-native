@@ -8,12 +8,18 @@ import {
   detectVersionChange,
   extractPushOpened,
   parseStoredAppVersion,
+  DEFAULT_PUSH_ACTION,
   PUSH_OPENED,
   PUSH_PERMISSION_CHANGED,
+  PUSH_RECEIVED,
   SCREEN_VIEWED,
+  SDK_NAME,
 } from "./autocapture.js";
+import { ASYNC_STORAGE_PACKAGE, loadDefaultStorage } from "./default-storage.js";
 import { deviceTraits } from "./device.js";
-import { currentAppState, currentOS, onAppStateChange, type AppStateStatus } from "./lifecycle.js";
+import { currentAppState, currentOS, currentOSInfo, onAppStateChange, type AppStateStatus } from "./lifecycle.js";
+import { requestPermission } from "./push-authorization.js";
+import { detectPushEnvironment, type PushEnvironmentInfo } from "./push-environment.js";
 import {
   isPushPermissionStatus,
   isPushPermissionWireStatus,
@@ -22,6 +28,7 @@ import {
   permissionAllowsPush,
   pushChannel,
   pushMeta,
+  registrationFromMeta,
   type PushPermissionWireStatus,
   type PushRegistration,
 } from "./push.js";
@@ -32,7 +39,10 @@ import { Transport, type SendOutcome } from "./transport.js";
 import type {
   IdentifyOp,
   IdentifyParams,
+  PushAuthorizationOptions,
+  PushOpenedOptions,
   PushPermissionStatus,
+  PushReceivedOptions,
   PushTokenInput,
   QueuedOp,
   TrackOp,
@@ -42,6 +52,9 @@ import type {
   WhisperrOptions,
   WhisperrPushOpen,
 } from "./types.js";
+
+/** React Native's development flag (undefined outside Metro). */
+declare const __DEV__: boolean | undefined;
 
 const DEFAULT_BASE = "https://api.whisperr.net";
 const SNAKE_CASE = /^[a-z0-9]+(?:_[a-z0-9]+)*$/;
@@ -58,7 +71,35 @@ const APP_VERSION_KEY = "whisperr.app_version";
 const PUSH_OPENED_KEY = "whisperr.push_opened";
 /** The device's notification permission (a PermissionRecord). */
 const PERMISSION_KEY = "whisperr.push_permission";
-const MAX_REMEMBERED_PUSH_OPENS = 100;
+/** whisperr_message_ids already reported as push_received (most recent last). */
+const PUSH_RECEIVED_KEY = "whisperr.push_received";
+/** The language the user picked in the app (setAppLanguage). */
+const APP_LANGUAGE_KEY = "whisperr.app_language";
+/** The restore record: `{ userId, traits, at }` of the last full identify delivered (24-hour throttle). */
+const RESTORE_RECORD_KEY = "whisperr.restore_record";
+const MAX_REMEMBERED_PUSH_IDS = 100;
+/** A restore identify is skipped when the same traits reached the server this recently. */
+const RESTORE_THROTTLE_MS = 24 * 60 * 60 * 1000;
+/** The same push token is sent again at most this often (at launch). */
+const PUSH_REREGISTER_MS = 7 * 24 * 60 * 60 * 1000;
+/** An open this soon after the client start, with no background since, is a cold start. */
+const COLD_START_WINDOW_MS = 10_000;
+
+/** Who a push token or an identify is for: the user, or (before login) the device's anonymous handle. */
+type Subject = { userId: string } | { anonymousId: string };
+
+/** The last push token sent from this device, and for whom. Persisted as PUSH_KEY. */
+interface PushPair {
+  userId?: string;
+  anonymousId?: string;
+  token: string;
+  meta?: string;
+  /** When it was last sent (ms). Absent in pairs SDK 0.4.x persisted. */
+  sentAt?: number;
+}
+
+/** One dev warning per process when no durable storage is available. */
+let warnedMemoryOnly = false;
 /**
  * Every key an SDK version before lifecycle events (0.2.x) could have
  * persisted. Any of them present means the app ran before: a missing version
@@ -97,6 +138,18 @@ export class WhisperrClient implements WhisperrApi {
   private readonly priorState: Promise<boolean>;
   /** The last-sent pair an earlier launch persisted, read before this launch can write one. */
   private readonly launchPush: Promise<string | null>;
+  /** The app language an earlier launch persisted, read before this launch can write one. */
+  private readonly launchLanguage: Promise<string | null>;
+  /** setAppLanguage(): the language the user picked; null when unset. */
+  private appLanguage: string | null = null;
+  /** setAppLanguage() ran before init resolved — init keeps this value. */
+  private appLanguageTouched = false;
+  /** The restore record: the last full identify delivered (restore-identify throttle). */
+  private restoreRecord: RestoreRecord | null = null;
+  /** WhisperrOptions.clientAppId. */
+  private readonly clientAppId?: string;
+  /** What the runtime tells about push (read once, on the first token). */
+  private pushEnvironment: PushEnvironmentInfo | null = null;
   private initialized = false;
   /**
    * Token captured before identify() (attached to the next identify), or held
@@ -109,7 +162,7 @@ export class WhisperrClient implements WhisperrApi {
    * getToken() wiring stays a no-op and a post-restart rotation still retires
    * the stale token.
    */
-  private lastPush: { userId: string; token: string; meta?: string } | null = null;
+  private lastPush: PushPair | null = null;
   /** The device's notification permission; null until the app reports one. */
   private permission: PermissionRecord | null = null;
   /** optOut() ran (persisted as OPTOUT_KEY). Only queued push opt-outs are sent. */
@@ -137,9 +190,15 @@ export class WhisperrClient implements WhisperrApi {
   /** A foreground was seen in this process — the next app_opened is a warm start. */
   private sawForeground = false;
 
-  // ---- push_opened dedup ----
+  // ---- push_opened / push_received dedup ----
   private readonly openedThisLaunch: string[] = [];
-  private persistedOpened = new Set<string>();
+  private readonly persistedOpened: RememberedIds;
+  private readonly receivedThisLaunch = new Set<string>();
+  private readonly persistedReceived: RememberedIds;
+  /** When this client started (cold-start detection for push_opened). */
+  private readonly startedAt = Date.now();
+  /** The app went to the background since this client started. */
+  private sawBackground = false;
 
   constructor(options: WhisperrOptions) {
     const baseUrl = (options.baseUrl ?? DEFAULT_BASE).replace(/\/+$/, "");
@@ -151,21 +210,26 @@ export class WhisperrClient implements WhisperrApi {
     this.disabled = !!options.disabled;
     this.autocapture = !this.disabled && (options.trackAppLifecycleEvents ?? true);
     this.flushOnBackground = options.flushOnAppBackground ?? true;
-    this.durableStorage = !!options.storage;
     // Manual screen(), push_opened and push_permission_changed carry these
     // too, so they resolve even with the automatic events off.
     this.appInfo = this.disabled ? {} : resolveAppInfo({ version: options.appVersion, build: options.appBuild });
+    const clientAppId = typeof options.clientAppId === "string" ? options.clientAppId.trim() : "";
+    if (clientAppId) this.clientAppId = clientAppId;
 
-    if (!options.storage) {
-      this.log("no `storage` provided — the queue is memory-only. Pass AsyncStorage to survive app restarts.");
-    }
-    this.storage = new SafeStorage(options.storage ?? new MemoryStorage());
+    // A passed adapter wins; else AsyncStorage when the app has it; else memory.
+    const durable = options.storage ?? (this.disabled ? undefined : loadDefaultStorage());
+    this.durableStorage = !!durable;
+    if (!durable && !this.disabled) this.warnMemoryOnly();
+    this.storage = new SafeStorage(durable ?? new MemoryStorage());
     // Snapshot "did the app run before?" now — before identify() / track() in
     // this launch tick can write user_id or session and fake prior state.
     this.priorState = Promise.all(PRIOR_STATE_KEYS.map((key) => this.storage.get(key))).then((values) =>
       values.some((v) => v !== null),
     );
     this.launchPush = this.storage.get(PUSH_KEY);
+    this.launchLanguage = this.storage.get(APP_LANGUAGE_KEY);
+    this.persistedOpened = new RememberedIds(this.storage, PUSH_OPENED_KEY);
+    this.persistedReceived = new RememberedIds(this.storage, PUSH_RECEIVED_KEY);
     this.queue = new DurableQueue(this.storage, options.maxQueueSize ?? 1000);
     this.session = new Session(this.storage);
     this.transport = new Transport(baseUrl, options.apiKey, options.requestTimeoutMs ?? 10000, this.debug);
@@ -205,28 +269,39 @@ export class WhisperrClient implements WhisperrApi {
 
   identify(externalUserId: string, params: IdentifyParams = {}): void {
     if (this.muted || this.closed || !externalUserId) return;
-    this.identityTouched = true;
+    this.identityTouched = true; // also skips this launch's restore identify
     this.userId = externalUserId;
     void this.storage.set(USER_KEY, externalUserId);
 
+    // The device's known token rides along: one buffered by setPushToken()
+    // before init, or one registered under this device's anonymous handle
+    // before login (whisperr-spec: identify attaches the known token).
+    // A token held back while notifications are denied stays held back.
+    const denied = this.permission?.status === "denied";
+    let known = denied ? null : this.pendingPushToken;
+    if (!known && !denied && this.initialized) {
+      const anonymous = this.pairFor({ anonymousId: this.anonId });
+      if (anonymous) known = registrationFromMeta(anonymous.token, anonymous.meta);
+    }
     // A push token supplied to identify() rotates like setPushToken(): if it
     // differs from the last token this client sent for this user, opt the old
     // one out in the same body so it isn't stranded opted-in.
-    // A token held back while notifications are denied stays held back.
-    const pending = this.permission?.status === "denied" ? null : this.pendingPushToken;
-    const channels = this.withPushRotation(externalUserId, buildChannels(params, pending));
+    const channels = this.withPushRotation(
+      externalUserId,
+      buildChannels(params, known, (reg) => this.withPushDefaults(reg)),
+    );
     // Mark the last-sent pair BEFORE enqueue so an overflow-evicted registration
     // clears the mark (mark-on-delivery), never stranding a token opted-out.
     this.rememberPushChannel(externalUserId, channels);
-    // Anonymous → identified: when events already went out under this
-    // device's anonymous handle, the identify carries it so the server
-    // promotes that anonymous user into this one. Before init we cannot know
-    // yet — init settles it (resolveAnonymous).
+    // Anonymous → identified: when events (or an anonymous identify) already
+    // went out under this device's anonymous handle, the identify carries it
+    // so the server promotes that anonymous user into this one. Before init
+    // we cannot know yet — init settles it (resolveAnonymous).
     let anonymousId: string | undefined;
     let resolveAnonymous: boolean | undefined;
     if (!this.initialized) {
       resolveAnonymous = true;
-    } else if (this.anonUsed) {
+    } else if (this.anonUsed || this.anonymousIdentifyQueued()) {
       anonymousId = this.anonId;
       this.setAnonUsed(false);
     }
@@ -235,21 +310,43 @@ export class WhisperrClient implements WhisperrApi {
       externalUserId,
       ...(anonymousId ? { anonymousId } : {}),
       ...(resolveAnonymous ? { resolveAnonymous } : {}),
-      traits: withDeviceTraits(params.traits),
+      traits: this.identifyTraits(params.traits),
+      restoreTraits: this.restoreTraits(),
       preferredChannel: params.preferredChannel,
       channels,
       occurredAt: nowISO(),
     });
-    if (pending) this.pendingPushToken = null;
+    if (!denied) this.pendingPushToken = null;
     // Pre-login events still queued go out under this user directly.
     this.queue.backfillIdentity(externalUserId, this.anonId || undefined);
     void this.flush();
   }
 
+  setAppLanguage(tag: string | null): void {
+    if (this.disabled || this.closed) return;
+    if (tag === null || tag === undefined) {
+      this.appLanguage = null;
+      this.appLanguageTouched = true;
+      void this.storage.remove(APP_LANGUAGE_KEY);
+      return;
+    }
+    const language = normalizeAppLanguage(tag);
+    if (!language) {
+      this.log(`setAppLanguage(): "${String(tag)}" is not a BCP 47 language tag — ignored`);
+      return;
+    }
+    if (this.initialized && language === this.appLanguage) return; // already stored and sent
+    this.appLanguage = language;
+    this.appLanguageTouched = true;
+    void this.storage.set(APP_LANGUAGE_KEY, language);
+    // Before init the subject is not known yet; init sends it (unless stored already).
+    if (this.initialized) this.sendAppLanguage(language);
+  }
+
   setPushToken(token: PushTokenInput): void {
     if (this.muted || this.closed) return;
     const reg = normalizePushToken(token);
-    if (reg) this.registerPushToken(reg);
+    if (reg) this.registerPushToken(this.withPushDefaults(reg));
   }
 
   setPushPermission(status: PushPermissionStatus): void {
@@ -262,6 +359,19 @@ export class WhisperrClient implements WhisperrApi {
     // across restarts.
     if (this.initialized) this.applyPermission(status);
     else void this.initPromise.then(() => this.applyPermission(status));
+  }
+
+  async requestPushAuthorization(options: PushAuthorizationOptions = {}): Promise<PushPermissionStatus | null> {
+    if (this.disabled || this.closed) return null;
+    const status = await requestPermission(options);
+    if (!status) {
+      this.log(
+        "requestPushAuthorization(): no permission API found — install expo-notifications or @react-native-firebase/messaging, or call setPushPermission() yourself",
+      );
+      return null;
+    }
+    this.setPushPermission(status);
+    return status;
   }
 
   track(eventType: string, properties?: Record<string, unknown>, context?: Record<string, unknown>): void {
@@ -285,12 +395,14 @@ export class WhisperrClient implements WhisperrApi {
     this.track(SCREEN_VIEWED, { ...automaticProperties(this.appInfo), ...properties, screen_name: screenName });
   }
 
-  trackPushOpened(data: unknown): WhisperrPushOpen | null {
-    const payload = extractPushOpened(data);
-    if (!payload) {
+  trackPushOpened(data: unknown, options: PushOpenedOptions = {}): WhisperrPushOpen | null {
+    const extracted = extractPushOpened(data);
+    if (!extracted) {
       this.log("trackPushOpened(): no whisperr_message_id in the payload — not a Whisperr push, ignored");
       return null;
     }
+    const explicitAction = cleanString(options.actionId);
+    const payload: WhisperrPushOpen = explicitAction ? { ...extracted, actionId: explicitAction } : extracted;
     // The app routes on the result even when nothing is sent.
     if (this.muted || this.closed) return payload;
     const { messageId, deepLink } = payload;
@@ -300,6 +412,10 @@ export class WhisperrClient implements WhisperrApi {
     if (this.openedThisLaunch.includes(messageId)) return payload;
     this.openedThisLaunch.push(messageId);
     const occurredAt = nowISO();
+    const coldStart =
+      typeof options.coldStart === "boolean"
+        ? options.coldStart
+        : !this.sawBackground && Date.now() - this.startedAt < COLD_START_WINDOW_MS;
     void this.initPromise.then(() => {
       if (this.muted || this.closed || this.persistedOpened.has(messageId)) return;
       this.enqueueTrack(
@@ -308,45 +424,89 @@ export class WhisperrClient implements WhisperrApi {
           ...automaticProperties(this.appInfo),
           whisperr_message_id: messageId,
           ...(deepLink ? { deep_link: deepLink } : {}),
+          action_id: payload.actionId ?? DEFAULT_PUSH_ACTION,
+          cold_start: coldStart,
         },
         undefined,
         occurredAt,
       );
-      this.persistedOpened.add(messageId);
-      const remembered = [...this.persistedOpened].slice(-MAX_REMEMBERED_PUSH_OPENS);
-      this.persistedOpened = new Set(remembered);
       // Mark the id as reported only once the queue write holding the event
       // has landed: a kill in between re-reports the open next launch rather
       // than losing it.
-      void this.queue.settle().then(() => this.storage.set(PUSH_OPENED_KEY, JSON.stringify(remembered)));
+      this.persistedOpened.add(messageId, this.queue.settle());
       void this.flush();
+    });
+    return payload;
+  }
+
+  trackPushReceived(data: unknown, options: PushReceivedOptions = {}): WhisperrPushOpen | null {
+    const payload = extractPushOpened(data);
+    if (!payload) {
+      this.log("trackPushReceived(): no whisperr_message_id in the payload — not a Whisperr push, ignored");
+      return null;
+    }
+    // An automatic event: the off switch (trackAppLifecycleEvents: false) stops it.
+    if (this.muted || this.closed || !this.autocapture) return payload;
+    const { messageId } = payload;
+    if (this.receivedThisLaunch.has(messageId)) return payload;
+    this.receivedThisLaunch.add(messageId);
+    const foreground = typeof options.foreground === "boolean" ? options.foreground : currentAppState() === "active";
+    const source = options.source ?? (foreground ? "foreground" : undefined);
+    const occurredAt = nowISO();
+    void this.initPromise.then(() => {
+      if (this.muted || this.closed || this.persistedReceived.has(messageId)) return;
+      this.enqueueTrack(
+        PUSH_RECEIVED,
+        {
+          ...automaticProperties(this.appInfo),
+          whisperr_message_id: messageId,
+          foreground,
+          ...(source ? { source } : {}),
+        },
+        undefined,
+        occurredAt,
+      );
+      this.persistedReceived.add(messageId, this.queue.settle());
     });
     return payload;
   }
 
   reset(): void {
     if (this.closed) return;
-    if (!this.initialized) {
+    const wasInitialized = this.initialized;
+    if (!wasInitialized) {
       // The previous handle is still being read from storage. Settle what was
       // captured before this logout now so none of it can attach to the next
       // person: identifies promote nothing, anonymous events get a one-off handle.
       this.queue.resolveIdentifyPromotions(undefined);
       this.queue.stampAnonymousId(uuid());
       this.anonRotatedBeforeInit = true;
+      // Init then moves the persisted pair's token to the new handle.
+      this.pushCleared = true;
     }
     this.identityTouched = true;
-    this.pushCleared = true; // don't let a still-pending init restore the pair
+    const last = wasInitialized ? this.lastPush : null;
     this.userId = null;
-    this.pendingPushToken = null;
-    this.lastPush = null;
+    this.forgetLastPush();
+    this.setRestoreRecord(null);
     // The next user gets a fresh push_permission_changed. The permission itself
     // is the device's, so a denied permission still holds tokens back.
     if (this.permission) this.setPermission({ status: this.permission.status });
-    this.anonId = uuid(); // fresh anonymous identity (a UUID v4, per the spec)
+    // (1) The token leaves the old user (or the old anonymous handle).
+    if (last && !this.muted) {
+      this.enqueue(subjectIdentify(pairSubject(last), { channels: [optOutChannel(last.token)] }));
+    }
+    // (2) A fresh anonymous identity (a UUID v4, per the spec).
+    this.anonId = uuid();
     this.setAnonUsed(false);
     void this.storage.remove(USER_KEY);
-    void this.storage.remove(PUSH_KEY);
     void this.storage.set(ANON_KEY, this.anonId);
+    // (3) The device's token moves to the new handle (held while denied).
+    if (wasInitialized && !this.muted) {
+      const reg = this.pendingPushToken ?? (last ? registrationFromMeta(last.token, last.meta) : null);
+      if (reg) this.registerPushToken(reg);
+    }
+    if (last) void this.flush();
   }
 
   optIn(): void {
@@ -360,6 +520,7 @@ export class WhisperrClient implements WhisperrApi {
     this.optedOut = true;
     this.pendingPushToken = null;
     this.queue.rewrite(pushRetirement);
+    this.setRestoreRecord(null);
     void this.storage.set(OPTOUT_KEY, "1");
     // Before init the last-sent pair is not restored yet; init sends it.
     if (this.initialized) this.queuePushOptOut();
@@ -407,20 +568,22 @@ export class WhisperrClient implements WhisperrApi {
 
     if (persistedUser && !this.identityTouched) this.userId = persistedUser;
 
-    // Restore the last-sent (user, token) pair so the every-launch getToken()
-    // re-send dedups and a post-restart rotation still opts out the old token.
-    // This must NOT be gated on identify() having run: apps call identify(user)
-    // in the same launch tick as construction, before init resolves, and
-    // skipping the restore then left lastPush null — so a post-restart rotation
-    // sent no opt-out and same-token dedup was defeated (identify spam every
-    // launch). Restoring after identify() is safe because setPushToken only
-    // opts out / dedups against a pair whose user matches the current user, so
-    // a pair from a prior user is ignored on use. Only reset() invalidates it,
-    // and a fresher pair already set in memory (a setPushToken that raced init)
-    // is never clobbered.
-    if (!this.pushCleared && !this.lastPush) {
-      const restored = parseLastPush(await this.storage.get(PUSH_KEY));
-      if (restored && !this.lastPush) this.lastPush = restored;
+    // Restore the last-sent pair so the every-launch getToken() re-send dedups
+    // and a post-restart rotation still opts out the old token. This must NOT
+    // be gated on identify() having run: apps call identify(user) in the same
+    // launch tick as construction, before init resolves. Restoring after
+    // identify() is safe because setPushToken only opts out / dedups against a
+    // pair whose subject matches the current one. Only reset() invalidates it
+    // (init then moves its token), and a fresher pair already set in memory (a
+    // setPushToken that raced init) is never clobbered.
+    const launchPair = parseLastPush(await this.launchPush);
+    if (!this.pushCleared && !this.lastPush && launchPair) this.lastPush = launchPair;
+
+    const storedLanguage = normalizeAppLanguage(await this.launchLanguage);
+    if (!this.appLanguageTouched) this.appLanguage = storedLanguage;
+    // reset() / optOut() before init deleted the record; a later read must not revive it.
+    if (!this.identityTouched && !this.optedOut) {
+      this.restoreRecord = parseRestoreRecord(await this.storage.get(RESTORE_RECORD_KEY));
     }
 
     // The permission is reported through setPushPermission(), which waits for
@@ -432,18 +595,8 @@ export class WhisperrClient implements WhisperrApi {
       else this.permission = storedPermission;
     }
 
-    const rawOpened = await this.storage.get(PUSH_OPENED_KEY);
-    if (rawOpened) {
-      try {
-        const ids = JSON.parse(rawOpened) as unknown;
-        if (Array.isArray(ids)) {
-          for (const id of ids) if (typeof id === "string") this.persistedOpened.add(id);
-        }
-      } catch {
-        /* corrupt payload — discard */
-      }
-    }
-
+    await this.persistedOpened.load();
+    await this.persistedReceived.load();
     await this.session.restore();
     await this.queue.restore();
 
@@ -455,12 +608,21 @@ export class WhisperrClient implements WhisperrApi {
       // SDK 0.4.x opted out locally only and kept the last-sent pair. Only a
       // pair from an earlier launch counts: one identify() marked this launch
       // before the opt-out was read never reached the server.
-      this.lastPush = this.pushCleared ? null : parseLastPush(await this.launchPush);
+      this.lastPush = this.pushCleared ? null : launchPair;
       this.queuePushOptOut();
       this.initialized = true;
       return;
     }
 
+    // identify() calls made before init carry the stored app language too.
+    const language = this.appLanguage;
+    if (language) {
+      this.queue.rewrite((op) => {
+        if (op.kind !== "identify" || !op.resolveAnonymous || !op.restoreTraits) return op;
+        const traits = op.traits && "app_language" in op.traits ? op.traits : { ...op.traits, app_language: language };
+        return { ...op, traits, restoreTraits: { ...op.restoreTraits, app_language: language } };
+      });
+    }
     // Ops captured before we knew who the user is (this launch, before init)
     // now attribute to the restored identity…
     if (this.userId) this.queue.backfillIdentity(this.userId, this.anonId);
@@ -468,44 +630,125 @@ export class WhisperrClient implements WhisperrApi {
     // device's anonymous handle.
     this.queue.stampAnonymousId(this.anonId);
     // identify() calls made before init: the first one promotes the handle if
-    // events already went out under it.
-    if (this.queue.resolveIdentifyPromotions(this.anonUsed ? this.anonId : undefined)) {
+    // events (or an anonymous identify) already went out under it.
+    const promote = this.anonUsed || this.anonymousIdentifyQueued();
+    if (this.queue.resolveIdentifyPromotions(promote ? this.anonId : undefined)) {
       this.setAnonUsed(false);
     }
     this.initialized = true;
-    // A token captured before the persisted identity was restored (common when
-    // the messaging lib fires at startup) now attributes to the restored user.
-    if (this.userId && this.pendingPushToken) this.registerPushToken(this.pendingPushToken);
+
+    // C1: a stored user is identified again at start (it carries the language).
+    const restored = persistedUser && !this.identityTouched ? this.queueRestoreIdentify(persistedUser) : false;
+    // C2: a language set before init that differs from the stored one.
+    if (!restored && this.appLanguageTouched && this.appLanguage && this.appLanguage !== storedLanguage) {
+      this.sendAppLanguage(this.appLanguage);
+    }
+    this.settlePushAtLaunch(this.pushCleared ? launchPair : null);
+  }
+
+  /**
+   * The restore identify (whisperr-spec: identify at every app start): one per
+   * process, skipped when the same traits reached the server for this user
+   * less than 24 hours ago. Returns true when it was queued.
+   */
+  private queueRestoreIdentify(userId: string): boolean {
+    const traits = this.restoreTraits();
+    const record = this.restoreRecord;
+    const age = record ? Date.now() - record.at : Number.POSITIVE_INFINITY;
+    if (record && record.userId === userId && sameTraits(record.traits, traits) && age >= 0 && age < RESTORE_THROTTLE_MS) {
+      return false;
+    }
+    // An earlier start's restore identify still waits in the queue (offline): it says the same.
+    const queued = this.queue.all.some(
+      (op) =>
+        op.kind === "identify" &&
+        op.externalUserId === userId &&
+        !!op.restoreTraits &&
+        !op.channels?.length &&
+        sameTraits(op.restoreTraits, traits),
+    );
+    if (queued) return false;
+    this.enqueue({
+      kind: "identify",
+      externalUserId: userId,
+      anonymousId: this.anonId,
+      ...(Object.keys(traits).length ? { traits } : {}),
+      restoreTraits: traits,
+      occurredAt: nowISO(),
+    });
+    this.setAnonUsed(false);
+    return true;
+  }
+
+  /** Queues `{ subject, traits: { app_language } }`: a partial or an anonymous identify. */
+  private sendAppLanguage(language: string): void {
+    if (this.muted || this.closed) return;
+    const op = subjectIdentify(this.subject(), { traits: { app_language: language } });
+    // A delivered language update for a user refreshes the restore record.
+    this.enqueue(op.externalUserId ? { ...op, languageUpdate: true } : op);
+    void this.flush();
+  }
+
+  /** What init does with push tokens once the subject is known. */
+  private settlePushAtLaunch(pairBeforeReset: PushPair | null): void {
+    if (this.pushCleared) {
+      // reset() ran before init: the persisted pair's token moves from its old
+      // subject to the current one (the new anonymous handle, or a user that
+      // identify() set since).
+      if (pairBeforeReset) {
+        this.enqueue(subjectIdentify(pairSubject(pairBeforeReset), { channels: [optOutChannel(pairBeforeReset.token)] }));
+        void this.flush();
+      }
+      const reg =
+        this.pendingPushToken ??
+        (pairBeforeReset ? registrationFromMeta(pairBeforeReset.token, pairBeforeReset.meta) : null);
+      if (reg) this.registerPushToken(reg);
+      return;
+    }
+    // A token captured before init now goes to the restored user, or before
+    // login to the anonymous handle.
+    if (this.pendingPushToken) {
+      this.registerPushToken(this.pendingPushToken);
+      return;
+    }
+    // A token registered before login while identify() raced init: the user takes it.
+    const pair = this.lastPush;
+    if (this.userId && pair && !pair.userId && pair.anonymousId === this.anonId) {
+      this.registerPushToken(registrationFromMeta(pair.token, pair.meta));
+      return;
+    }
+    // Re-registration: the same token goes out again once every 7 days.
+    const current = this.pairFor(this.subject());
+    if (current && !isFresh(current.sentAt)) this.registerPushToken(registrationFromMeta(current.token, current.meta));
   }
 
   // ---- push token + permission ----
 
   private registerPushToken(reg: PushRegistration): void {
     // Held, not sent: before init (the restored last-sent pair and permission
-    // decide it then), before we know the user (the next identify() takes it),
-    // and while notifications are off (the next allowed report sends it).
-    if (!this.initialized || !this.userId || this.permission?.status === "denied") {
+    // decide it then) and while notifications are off (the next allowed
+    // report sends it). Before login it goes to the anonymous handle.
+    if (!this.initialized || this.permission?.status === "denied") {
       this.pendingPushToken = reg;
       return;
     }
     this.pendingPushToken = null; // the token is handled here, sent or deduped
-    const last = this.lastPush && this.lastPush.userId === this.userId ? this.lastPush : null;
-    const meta = pushMeta(reg);
-    // Refresh storm / every-launch re-send: same token, nothing new to say.
-    // A bare token never downgrades a registration that carried metadata.
-    if (last && last.token === reg.token && (meta === "" || meta === (last.meta ?? ""))) return;
+    const subject = this.subject();
+    const last = this.pairFor(subject);
+    const sameToken = !!last && last.token === reg.token;
+    // Refresh storm / every-launch re-send: same token, nothing new to say —
+    // unless the last send is 7 days old (re-registration). A token with less
+    // metadata never downgrades a registration that carried more.
+    const covered = !!last && sameToken && metaCovers(last.meta, reg);
+    if (covered && isFresh(last.sentAt)) return;
+    const send = covered && last ? { ...registrationFromMeta(last.token, last.meta), ...definedFields(reg) } : reg;
     const channels: WhisperrChannel[] = [];
     // Rotation: retire the token this client previously registered.
-    if (last && last.token !== reg.token) channels.push({ type: "push", address: last.token, optedIn: false });
-    channels.push(pushChannel(reg, true));
+    if (last && !sameToken) channels.push(optOutChannel(last.token));
+    channels.push(pushChannel(send, true));
     // Mark BEFORE enqueue so an overflow-evicted registration clears the mark.
-    this.setLastPush(this.userId, reg.token, meta || last?.meta);
-    this.enqueue({
-      kind: "identify",
-      externalUserId: this.userId,
-      channels,
-      occurredAt: nowISO(),
-    });
+    this.setLastPush(subject, send.token, pushMeta(send) || last?.meta);
+    this.enqueue(subjectIdentify(subject, { channels }));
     void this.flush();
   }
 
@@ -528,11 +771,9 @@ export class WhisperrClient implements WhisperrApi {
         nowISO(),
       );
     }
-    const userId = this.userId;
-    const channels = userId ? this.permissionChannels(status, userId) : [];
-    if (userId && channels.length) {
-      this.enqueue({ kind: "identify", externalUserId: userId, channels, occurredAt: nowISO() });
-    }
+    const subject = this.subject();
+    const channels = this.permissionChannels(status, subject);
+    if (channels.length) this.enqueue(subjectIdentify(subject, { channels }));
     void this.flush();
   }
 
@@ -540,22 +781,22 @@ export class WhisperrClient implements WhisperrApi {
    * The push channel changes a permission report causes: `denied` opts the
    * registered token out and holds it; an allowed status registers a held token.
    */
-  private permissionChannels(status: PushPermissionStatus, userId: string): WhisperrChannel[] {
-    const last = this.lastPush && this.lastPush.userId === userId ? this.lastPush : null;
+  private permissionChannels(status: PushPermissionStatus, subject: Subject): WhisperrChannel[] {
+    const last = this.pairFor(subject);
     if (status === "denied") {
       if (!last) return [];
       if (!this.pendingPushToken) this.pendingPushToken = registrationFromMeta(last.token, last.meta);
       this.forgetLastPush();
-      return [{ type: "push", address: last.token, optedIn: false }];
+      return [optOutChannel(last.token)];
     }
     if (!permissionAllowsPush(status) || !this.pendingPushToken) return [];
     const reg = this.pendingPushToken;
     this.pendingPushToken = null;
     if (last && last.token === reg.token) return [];
     const channels: WhisperrChannel[] = [];
-    if (last) channels.push({ type: "push", address: last.token, optedIn: false });
+    if (last) channels.push(optOutChannel(last.token));
     channels.push(pushChannel(reg, true));
-    this.setLastPush(userId, reg.token, pushMeta(reg) || undefined);
+    this.setLastPush(subject, reg.token, pushMeta(reg) || undefined);
     return channels;
   }
 
@@ -566,22 +807,68 @@ export class WhisperrClient implements WhisperrApi {
 
   /**
    * optOut() tells the server about this device: when this client holds a
-   * last-sent pair, one partial identify opts that token out under the pair's
-   * user, who is not always the current one (identify() without reset()). It
-   * survives a restart until delivered. The pair is forgotten, so after
-   * optIn() the next setPushToken() registers the token again.
+   * last-sent pair, one identify opts that token out under the pair's
+   * subject, which is not always the current one (identify() without
+   * reset()). It survives a restart until delivered. The pair is forgotten,
+   * so after optIn() the next setPushToken() registers the token again.
    */
   private queuePushOptOut(): void {
     const last = this.lastPush;
     this.forgetLastPush();
     if (!last) return;
-    this.enqueue({
-      kind: "identify",
-      externalUserId: last.userId,
-      channels: [{ type: "push", address: last.token, optedIn: false }],
-      occurredAt: nowISO(),
-    });
+    this.enqueue(subjectIdentify(pairSubject(last), { channels: [optOutChannel(last.token)] }));
     void this.flush();
+  }
+
+  /** The current subject: the user, else (before login) the anonymous handle. */
+  private subject(): Subject {
+    return this.userId ? { userId: this.userId } : { anonymousId: this.anonId };
+  }
+
+  /** The last-sent pair when it belongs to `subject`. */
+  private pairFor(subject: Subject): PushPair | null {
+    const last = this.lastPush;
+    if (!last) return null;
+    if ("userId" in subject) return last.userId === subject.userId ? last : null;
+    return !last.userId && last.anonymousId === subject.anonymousId ? last : null;
+  }
+
+  /** An anonymous identify of the current handle waits in the queue. */
+  private anonymousIdentifyQueued(): boolean {
+    return this.queue.all.some((op) => op.kind === "identify" && !op.externalUserId && op.anonymousId === this.anonId);
+  }
+
+  /** Traits of a full identify: device defaults, the stored app language, then the caller's. */
+  private identifyTraits(traits: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+    const merged = withDeviceTraits(traits);
+    if (!this.appLanguage || (traits && "app_language" in traits)) return merged;
+    return { ...merged, app_language: this.appLanguage };
+  }
+
+  /** The restore traits: the device defaults and the stored app language. */
+  private restoreTraits(): Record<string, unknown> {
+    return { ...deviceTraits(), ...(this.appLanguage ? { app_language: this.appLanguage } : {}) };
+  }
+
+  /**
+   * Fills the token fields the caller left out from what the runtime knows
+   * (whisperr-spec contract v2): `platform` always, `client_app_id`,
+   * `provider_project` (not for APNs tokens) and `push_env` (APNs only).
+   */
+  private withPushDefaults(reg: PushRegistration): PushRegistration {
+    const env = (this.pushEnvironment ??= detectPushEnvironment());
+    const platform = reg.platform ?? env.platform;
+    const clientAppId = reg.clientAppId ?? this.clientAppId ?? env.clientAppId;
+    const providerProject =
+      reg.providerProject ?? (reg.kind && reg.kind !== "apns" ? env.providerProject(reg.kind) : undefined);
+    const pushEnv = reg.pushEnv ?? (reg.kind === "apns" ? env.pushEnv : undefined);
+    return {
+      ...reg,
+      ...(platform ? { platform } : {}),
+      ...(clientAppId ? { clientAppId } : {}),
+      ...(providerProject ? { providerProject } : {}),
+      ...(pushEnv ? { pushEnv } : {}),
+    };
   }
 
   // ---- automatic lifecycle events ----
@@ -599,6 +886,7 @@ export class WhisperrClient implements WhisperrApi {
   private handleAppState(state: AppStateStatus): void {
     if (this.closed) return;
     const at = Date.now();
+    if (state === "background") this.sawBackground = true;
     const queued = this.autocapture ? this.runLifecycle(() => this.captureTransition(state, at)) : Promise.resolve();
     if (this.flushOnBackground && (state === "background" || state === "inactive")) {
       // After app_backgrounded is queued, so the last foreground period ships now.
@@ -688,7 +976,7 @@ export class WhisperrClient implements WhisperrApi {
   /** Records the opted-in push channel (if any) that an identify just sent. */
   private rememberPushChannel(userId: string, channels: WhisperrChannel[] | undefined): void {
     const push = channels?.filter((c) => c.type === "push" && c.optedIn !== false).pop();
-    if (push) this.setLastPush(userId, push.address, pushMeta(push) || undefined);
+    if (push) this.setLastPush({ userId }, push.address, pushMeta(push) || undefined);
   }
 
   /**
@@ -703,7 +991,7 @@ export class WhisperrClient implements WhisperrApi {
     if (!channels) return channels;
     const newPush = channels.filter((c) => c.type === "push" && c.optedIn !== false).pop();
     if (!newPush) return channels;
-    const last = this.lastPush && this.lastPush.userId === userId ? this.lastPush.token : null;
+    const last = this.pairFor({ userId })?.token ?? null;
     if (!last || last === newPush.address) return channels;
     if (channels.some((c) => c.type === "push" && c.address === last)) return channels;
     return [{ type: "push", address: last, optedIn: false }, ...channels];
@@ -729,7 +1017,7 @@ export class WhisperrClient implements WhisperrApi {
     const last = this.lastPush;
     if (!last) return;
     for (const op of discarded) {
-      if (op.kind !== "identify" || op.externalUserId !== last.userId) continue;
+      if (op.kind !== "identify" || !opIsFor(op, last)) continue;
       const carried = op.channels?.some(
         (c) => c.type === "push" && c.optedIn !== false && c.address === last.token,
       );
@@ -740,9 +1028,9 @@ export class WhisperrClient implements WhisperrApi {
     }
   }
 
-  /** Updates the last-sent (user, token) pair and persists it (write-behind). */
-  private setLastPush(userId: string, token: string, meta?: string): void {
-    this.lastPush = { userId, token, ...(meta ? { meta } : {}) };
+  /** Updates the last-sent (subject, token) pair and persists it (write-behind). */
+  private setLastPush(subject: Subject, token: string, meta?: string): void {
+    this.lastPush = { ...subject, token, ...(meta ? { meta } : {}), sentAt: Date.now() };
     void this.storage.set(PUSH_KEY, JSON.stringify(this.lastPush));
   }
 
@@ -763,6 +1051,9 @@ export class WhisperrClient implements WhisperrApi {
       let outcome: SendOutcome;
       let count: number;
       if (front.kind === "identify") {
+        // An anonymous identify writes to the current handle: the next
+        // identify must carry it so the server promotes that user.
+        if (!front.externalUserId && front.anonymousId === this.anonId) this.setAnonUsed(true);
         outcome = await this.transport.sendIdentify(front);
         count = 1;
       } else {
@@ -780,6 +1071,7 @@ export class WhisperrClient implements WhisperrApi {
       if (this.queue.all[0] !== front) continue;
 
       if (result === "ok") {
+        if (front.kind === "identify" && front.externalUserId) this.recordDelivery(front, front.externalUserId);
         this.queue.removeFront(count);
         retries = 0;
         continue;
@@ -824,14 +1116,64 @@ export class WhisperrClient implements WhisperrApi {
     return batch;
   }
 
+  /**
+   * The context every event carries. `app_version`, `app_build`, `platform`,
+   * `sdk_name` and `sdk_version` are the version keys of whisperr-spec (a
+   * value the runtime cannot provide is left out). Never `locale`: the server
+   * reads `context.locale` as the message language of that event.
+   */
   private baseContext(): Record<string, unknown> {
     const ctx: Record<string, unknown> = {
-      library: { name: "whisperr-react-native", version: LIB_VERSION },
+      library: { name: SDK_NAME, version: LIB_VERSION },
       session_id: this.session.current(),
     };
     const os = currentOS();
     if (os) ctx.os = os;
+    if (this.appInfo.version) ctx.app_version = this.appInfo.version;
+    if (this.appInfo.build) ctx.app_build = this.appInfo.build;
+    const platform = currentOSInfo().platform;
+    if (platform) ctx.platform = platform;
+    ctx.sdk_name = SDK_NAME;
+    ctx.sdk_version = LIB_VERSION;
     return ctx;
+  }
+
+  /**
+   * The restore record after a 2xx: a full identify stores its user, the
+   * restore traits it was built with, and the time; a delivered language
+   * update for the same user changes only `app_language`.
+   */
+  private recordDelivery(op: IdentifyOp, userId: string): void {
+    if (this.optedOut) return;
+    if (op.restoreTraits) {
+      this.setRestoreRecord({ userId, traits: { ...op.restoreTraits }, at: Date.now() });
+      return;
+    }
+    const record = this.restoreRecord;
+    const language = op.traits?.app_language;
+    if (op.languageUpdate && record && record.userId === userId && typeof language === "string") {
+      this.setRestoreRecord({ ...record, traits: { ...record.traits, app_language: language } });
+    }
+  }
+
+  private setRestoreRecord(record: RestoreRecord | null): void {
+    this.restoreRecord = record;
+    void (record
+      ? this.storage.set(RESTORE_RECORD_KEY, JSON.stringify(record))
+      : this.storage.remove(RESTORE_RECORD_KEY));
+  }
+
+  private warnMemoryOnly(): void {
+    if (warnedMemoryOnly) return;
+    const dev = typeof __DEV__ !== "undefined" && __DEV__;
+    if (!dev && !this.debug) return;
+    warnedMemoryOnly = true;
+    if (typeof console !== "undefined") {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[whisperr] no storage: the user id and the queue are kept in memory only. Install ${ASYNC_STORAGE_PACKAGE} (the SDK uses it automatically) or pass \`storage\`.`,
+      );
+    }
   }
 
   private startTimer(intervalMs: number): void {
@@ -878,21 +1220,175 @@ function pushRetirement(op: QueuedOp): IdentifyOp | null {
   if (op.kind !== "identify") return null;
   const retired = op.channels?.filter((c) => c.type === "push" && c.optedIn === false) ?? [];
   if (!retired.length) return null;
-  return { kind: "identify", externalUserId: op.externalUserId, channels: retired, occurredAt: op.occurredAt };
+  const subject: Subject | null = op.externalUserId
+    ? { userId: op.externalUserId }
+    : op.anonymousId
+      ? { anonymousId: op.anonymousId }
+      : null;
+  if (!subject) return null;
+  return { ...subjectIdentify(subject, { channels: retired }), occurredAt: op.occurredAt };
 }
 
-function parseLastPush(raw: string | null): { userId: string; token: string; meta?: string } | null {
+/** An identify for `subject`: a partial identify for a user, an anonymous identify for a handle. */
+function subjectIdentify(
+  subject: Subject,
+  fields: { channels?: WhisperrChannel[]; traits?: Record<string, unknown> },
+): IdentifyOp {
+  return {
+    kind: "identify",
+    ...("userId" in subject ? { externalUserId: subject.userId } : { anonymousId: subject.anonymousId }),
+    ...fields,
+    occurredAt: nowISO(),
+  };
+}
+
+function pairSubject(pair: PushPair): Subject {
+  return pair.userId ? { userId: pair.userId } : { anonymousId: pair.anonymousId ?? "" };
+}
+
+/** The identify `op` is addressed to the pair's subject. */
+function opIsFor(op: IdentifyOp, pair: PushPair): boolean {
+  if (op.externalUserId) return op.externalUserId === pair.userId;
+  return !pair.userId && !!op.anonymousId && op.anonymousId === pair.anonymousId;
+}
+
+/** Every field `reg` sets equals the one in the stored metadata signature. */
+function metaCovers(meta: string | undefined, reg: PushRegistration): boolean {
+  const stored = registrationFromMeta(reg.token, meta);
+  return (["kind", "platform", "pushEnv", "clientAppId", "providerProject"] as const).every(
+    (field) => !reg[field] || reg[field] === stored[field],
+  );
+}
+
+function definedFields(reg: PushRegistration): Partial<PushRegistration> {
+  return Object.fromEntries(Object.entries(reg).filter(([, v]) => v !== undefined && v !== ""));
+}
+
+function optOutChannel(token: string): WhisperrChannel {
+  return { type: "push", address: token, optedIn: false };
+}
+
+/** A pair sent less than 7 days ago. A pair without `sentAt` (SDK 0.4.x) is due. */
+function isFresh(sentAt: number | undefined): boolean {
+  if (sentAt === undefined) return false;
+  const age = Date.now() - sentAt;
+  return age >= 0 && age < PUSH_REREGISTER_MS;
+}
+
+/** SDK 0.4.x stored `{ userId, token, meta }`; 0.5 adds `anonymousId` and `sentAt`. */
+function parseLastPush(raw: string | null): PushPair | null {
   if (!raw) return null;
   try {
-    const parsed = JSON.parse(raw) as { userId?: unknown; token?: unknown; meta?: unknown };
-    if (typeof parsed.userId !== "string" || typeof parsed.token !== "string") return null;
+    const parsed = JSON.parse(raw) as {
+      userId?: unknown;
+      anonymousId?: unknown;
+      token?: unknown;
+      meta?: unknown;
+      sentAt?: unknown;
+    };
+    if (typeof parsed.token !== "string" || !parsed.token) return null;
+    const subject =
+      typeof parsed.userId === "string" && parsed.userId
+        ? { userId: parsed.userId }
+        : typeof parsed.anonymousId === "string" && parsed.anonymousId
+          ? { anonymousId: parsed.anonymousId }
+          : null;
+    if (!subject) return null;
     return {
-      userId: parsed.userId,
+      ...subject,
       token: parsed.token,
       ...(typeof parsed.meta === "string" && parsed.meta ? { meta: parsed.meta } : {}),
+      ...(typeof parsed.sentAt === "number" && Number.isFinite(parsed.sentAt) ? { sentAt: parsed.sentAt } : {}),
     };
   } catch {
     return null; // corrupt payload — discard
+  }
+}
+
+/** The restore record (whisperr-spec: Restore identify at start → 24-hour throttle). */
+interface RestoreRecord {
+  userId: string;
+  /** The restore traits (device defaults + app_language) the delivered identify was built with. */
+  traits: Record<string, unknown>;
+  /** When it was delivered (wall clock, ms). */
+  at: number;
+}
+
+function parseRestoreRecord(raw: string | null): RestoreRecord | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as { userId?: unknown; traits?: unknown; at?: unknown };
+    const traits = parsed.traits;
+    if (
+      typeof parsed.userId !== "string" ||
+      typeof parsed.at !== "number" ||
+      !traits ||
+      typeof traits !== "object" ||
+      Array.isArray(traits)
+    ) {
+      return null;
+    }
+    return { userId: parsed.userId, traits: traits as Record<string, unknown>, at: parsed.at };
+  } catch {
+    return null; // corrupt payload — send the restore identify
+  }
+}
+
+/** Equal restore traits: the same keys with the same values. */
+function sameTraits(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
+  const stable = (t: Record<string, unknown>) => JSON.stringify(Object.keys(t).sort().map((k) => [k, t[k]]));
+  return stable(a) === stable(b);
+}
+
+const LANGUAGE_TAG = /^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/;
+
+/** A BCP 47 tag with `_` read as `-` (`pt_BR` → `pt-BR`), or null when invalid. */
+export function normalizeAppLanguage(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const tag = value.trim().replace(/_/g, "-");
+  if (!LANGUAGE_TAG.test(tag) || tag.toLowerCase() === "und" || tag.length > 35) return null;
+  return tag;
+}
+
+function cleanString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const v = value.trim();
+  return v || undefined;
+}
+
+/**
+ * whisperr_message_ids already reported (push_opened / push_received), most
+ * recent last, persisted so a repeated report is a no-op across restarts.
+ */
+class RememberedIds {
+  private ids = new Set<string>();
+
+  constructor(
+    private readonly storage: SafeStorage,
+    private readonly key: string,
+  ) {}
+
+  async load(): Promise<void> {
+    const raw = await this.storage.get(this.key);
+    if (!raw) return;
+    try {
+      const ids = JSON.parse(raw) as unknown;
+      if (Array.isArray(ids)) for (const id of ids) if (typeof id === "string") this.ids.add(id);
+    } catch {
+      /* corrupt payload — discard */
+    }
+  }
+
+  has(id: string): boolean {
+    return this.ids.has(id);
+  }
+
+  /** Adds `id`; persists once `after` (the queue write holding the event) has landed. */
+  add(id: string, after: Promise<void>): void {
+    this.ids.add(id);
+    const remembered = [...this.ids].slice(-MAX_REMEMBERED_PUSH_IDS);
+    this.ids = new Set(remembered);
+    void after.then(() => this.storage.set(this.key, JSON.stringify(remembered)));
   }
 }
 
@@ -926,7 +1422,11 @@ function withDeviceTraits(traits: Record<string, unknown> | undefined): Record<s
   return Object.keys(merged).length ? merged : undefined;
 }
 
-function buildChannels(params: IdentifyParams, pendingPushToken: PushRegistration | null): WhisperrChannel[] | undefined {
+function buildChannels(
+  params: IdentifyParams,
+  pendingPushToken: PushRegistration | null,
+  withDefaults: (reg: PushRegistration) => PushRegistration,
+): WhisperrChannel[] | undefined {
   const out: WhisperrChannel[] = [];
   if (params.channels && params.channels.length) {
     out.push(...params.channels);
@@ -936,7 +1436,7 @@ function buildChannels(params: IdentifyParams, pendingPushToken: PushRegistratio
     if (params.email) out.push({ type: "email", address: params.email });
     if (params.phone) out.push({ type: "sms", address: params.phone, optedIn: true });
     const push = normalizePushToken(params.pushToken);
-    if (push) out.push(pushChannel(push, true));
+    if (push) out.push(pushChannel(withDefaults(push), true));
   }
   // A token buffered by setPushToken() rides along unless the caller supplied
   // its own push channel.
@@ -954,15 +1454,4 @@ function retryDelay(attempt: number, retryAfterMs?: number): number {
 
 function delay(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
-}
-
-/** Rebuilds a registration from a persisted metadata signature (see pushMeta). */
-function registrationFromMeta(token: string, meta: string | undefined): PushRegistration {
-  const [kind, platform, pushEnv] = (meta ?? "").split("|");
-  return {
-    token,
-    ...(kind ? { kind: kind as PushRegistration["kind"] } : {}),
-    ...(platform ? { platform: platform as PushRegistration["platform"] } : {}),
-    ...(pushEnv ? { pushEnv: pushEnv as PushRegistration["pushEnv"] } : {}),
-  };
 }

@@ -48,10 +48,10 @@ export function wireEvent(e: TrackOp): Record<string, unknown> {
 
 /** The /v1/identify body for a queued identify op. */
 export function identifyBody(op: IdentifyOp): Record<string, unknown> {
-  const body: Record<string, unknown> = {
-    external_user_id: op.externalUserId,
-  };
-  // The server promotes this handle's anonymous user into external_user_id.
+  const body: Record<string, unknown> = {};
+  // An anonymous identify (no external_user_id) writes to this handle's
+  // anonymous user; with external_user_id the server promotes that user.
+  if (op.externalUserId) body.external_user_id = op.externalUserId;
   if (op.anonymousId) body.anonymous_id = op.anonymousId;
   if (op.traits && Object.keys(op.traits).length) body.traits = op.traits;
   if (op.preferredChannel) body.preferred_channel = op.preferredChannel;
@@ -64,7 +64,8 @@ export function identifyBody(op: IdentifyOp): Record<string, unknown> {
       // (or a shortcut that implies them, like an OS-granted push token) set them.
       ...(c.optedIn !== undefined ? { opted_in: c.optedIn } : {}),
       ...(c.verified !== undefined ? { verified: c.verified } : {}),
-      // Push token metadata (kind / platform / push_env): only the known values,
+      // Push token metadata (kind / platform / push_env / client_app_id /
+      // provider_project): only the known values,
       // and only on an opted-in entry. An opt-out is matched by address alone.
       ...(c.optedIn !== false ? pushWireMeta(c) : {}),
     }));

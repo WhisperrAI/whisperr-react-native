@@ -3,10 +3,17 @@
  * plus the follow-up work real apps forget: permission changes made in the OS
  * settings, and token rotation.
  */
+import * as Application from "expo-application";
 import Constants, { ExecutionEnvironment } from "expo-constants";
 import * as Notifications from "expo-notifications";
 import { AppState, Platform } from "react-native";
-import { Whisperr, type PushPermissionStatus, type WhisperrApi } from "@whisperr/react-native";
+import {
+  Whisperr,
+  type PushAuthorizationOptions,
+  type PushPermissionStatus,
+  type PushTokenRegistration,
+  type WhisperrApi,
+} from "@whisperr/react-native";
 
 export interface AndroidChannelOptions {
   /** Channel id. Default `"default"` — the channel the config plugin names for FCM. */
@@ -25,8 +32,27 @@ export interface RegisterForPushOptions {
    * from the app config (set by `eas init`), then `Constants.easConfig`.
    */
   projectId?: string;
+  /**
+   * Which token to send. `"expo"` (default): the Expo push token, for sending
+   * through Expo's push service. `"device"`: the native APNs or FCM token
+   * (`getDevicePushTokenAsync()`), for sending through your own APNs key or
+   * Firebase project. An APNs token then carries its `push_env`.
+   */
+  tokenType?: "expo" | "device";
+  /**
+   * Sent as `provider_project`. Default: the EAS project id for Expo tokens,
+   * nothing for device tokens. With `tokenType: "device"` on Android, pass
+   * your Firebase project id.
+   */
+  providerProject?: string;
   /** Show the OS permission prompt when the app may still ask. Default true. */
   requestPermission?: boolean;
+  /**
+   * iOS: ask for provisional (quiet) delivery. iOS shows no prompt; the
+   * notifications go to Notification Center only. Same as
+   * `ios: { allowProvisional: true }`. Default false.
+   */
+  provisional?: boolean;
   /** iOS prompt options. Default: alert, badge, and sound. Set `allowProvisional` for quiet delivery without a prompt. */
   ios?: Notifications.IosNotificationPermissionsRequest;
   /**
@@ -63,7 +89,7 @@ export type PushRegistrationReason =
 export interface PushRegistrationResult {
   /** The notification permission, as reported to Whisperr. */
   status: PushPermissionStatus;
-  /** The Expo push token sent to Whisperr, or null. */
+  /** The push token sent to Whisperr (Expo, or the device token with `tokenType: "device"`), or null. */
   token: string | null;
   /** Set when `token` is null. */
   reason?: PushRegistrationReason;
@@ -91,7 +117,10 @@ let watcher: Watcher | null = null;
 
 /**
  * Asks for notification permission, gets the Expo push token, and sends both
- * to Whisperr (`setPushPermission`, then `setPushToken` with `kind: "expo"`).
+ * to Whisperr (`setPushPermission`, then `setPushToken` with `kind: "expo"`,
+ * the EAS project id as `provider_project`, and the app id as
+ * `client_app_id`). With `tokenType: "device"` it sends the native APNs / FCM
+ * token instead.
  * Never throws: the result says what happened.
  *
  * Call it after `Whisperr.init()`, at the moment you want the OS prompt (for
@@ -118,7 +147,7 @@ export async function registerForPushNotifications(
     let permissions = await Notifications.getPermissionsAsync();
     status = toPermissionStatus(permissions);
     if (options.requestPermission !== false && !allowsPush(status) && permissions.canAskAgain !== false) {
-      permissions = await Notifications.requestPermissionsAsync({ ios: options.ios ?? DEFAULT_IOS });
+      permissions = await Notifications.requestPermissionsAsync({ ios: iosRequest(options) });
       status = toPermissionStatus(permissions);
     }
     client.setPushPermission(status);
@@ -134,6 +163,81 @@ export async function registerForPushNotifications(
     return { status, token: null, reason: status === "denied" ? "permission_denied" : "permission_undetermined" };
   }
   return { status, ...(await registerToken(ctx)) };
+}
+
+/**
+ * Shows the OS notification prompt and reports the answer to Whisperr
+ * (`setPushPermission`). With `provisional: true`, iOS grants quiet delivery
+ * without a prompt. Resolves to the status. Never throws. Use
+ * registerForPushNotifications() when you also want the token.
+ */
+export async function requestPushAuthorization(
+  options: PushAuthorizationOptions & { client?: WhisperrApi | null } = {},
+): Promise<PushPermissionStatus> {
+  const client = options.client ?? Whisperr.instance;
+  let status: PushPermissionStatus = "undetermined";
+  try {
+    status = toPermissionStatus(
+      await Notifications.requestPermissionsAsync({
+        ios: { ...DEFAULT_IOS, ...(options.provisional ? { allowProvisional: true } : {}) },
+      }),
+    );
+  } catch {
+    return status;
+  }
+  client?.setPushPermission(status);
+  return status;
+}
+
+/**
+ * Turns an expo-notifications device token (`getDevicePushTokenAsync()`) into
+ * a Whisperr registration: `apns` with its `push_env` on iOS, `fcm` on
+ * Android, plus the app id. Pass the result to `setPushToken()`.
+ */
+export async function toWhisperrPushToken(
+  deviceToken: Notifications.DevicePushToken,
+  options: { providerProject?: string } = {},
+): Promise<PushTokenRegistration | null> {
+  const token = typeof deviceToken.data === "string" ? deviceToken.data.trim() : "";
+  if (!token) return null;
+  const clientAppId = applicationId();
+  const ids = {
+    ...(clientAppId ? { clientAppId } : {}),
+    ...(options.providerProject ? { providerProject: options.providerProject } : {}),
+  };
+  if (deviceToken.type === "ios") {
+    const pushEnv = await apnsEnvironment();
+    return { token, kind: "apns", platform: "ios", ...(pushEnv ? { pushEnv } : {}), ...ids };
+  }
+  if (deviceToken.type === "android") return { token, kind: "fcm", platform: "android", ...ids };
+  return null;
+}
+
+/** The iOS bundle id / Android package name from expo-application, if known. */
+export function applicationId(): string | undefined {
+  try {
+    const id = Application.applicationId;
+    return typeof id === "string" && id.trim() ? id.trim() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The APNs environment of this build: `sandbox` for development signing, else `production`. */
+async function apnsEnvironment(): Promise<"production" | "sandbox" | undefined> {
+  try {
+    const env = await Application.getIosPushNotificationServiceEnvironmentAsync();
+    if (env === "development") return "sandbox";
+    if (env === "production") return "production";
+  } catch {
+    /* not iOS, or the native module is missing */
+  }
+  return undefined;
+}
+
+function iosRequest(options: RegisterForPushOptions): Notifications.IosNotificationPermissionsRequest {
+  const base = options.ios ?? DEFAULT_IOS;
+  return options.provisional ? { ...base, allowProvisional: true } : base;
 }
 
 /** Stops the foreground permission check and token-rotation listener that registerForPushNotifications() started. */
@@ -192,6 +296,7 @@ async function registerToken(ctx: Context): Promise<Omit<PushRegistrationResult,
     log(ctx.options, "Expo Go on Android cannot receive remote push (SDK 53+). Use a development build.");
     return { token: null, reason: "expo_go_android" };
   }
+  if (ctx.options.tokenType === "device") return registerDeviceToken(ctx);
   const projectId = resolveProjectId(ctx.options.projectId);
   if (!projectId) {
     log(ctx.options, "no EAS project id: run `eas init` or pass `projectId`");
@@ -200,10 +305,36 @@ async function registerToken(ctx: Context): Promise<Omit<PushRegistrationResult,
   try {
     const { data } = await Notifications.getExpoPushTokenAsync({ projectId });
     ctx.token = data;
-    ctx.client.setPushToken({ token: data, kind: "expo" });
+    const clientAppId = applicationId();
+    ctx.client.setPushToken({
+      token: data,
+      kind: "expo",
+      // The EAS project the token belongs to: the server catches a token of
+      // another project before a send.
+      providerProject: ctx.options.providerProject ?? projectId,
+      ...(clientAppId ? { clientAppId } : {}),
+    });
     return { token: data };
   } catch (error) {
     log(ctx.options, `no Expo push token: ${String(error)}`);
+    return { token: null, reason: "token_unavailable", error };
+  }
+}
+
+async function registerDeviceToken(ctx: Context): Promise<Omit<PushRegistrationResult, "status">> {
+  try {
+    const registration = await toWhisperrPushToken(await Notifications.getDevicePushTokenAsync(), {
+      providerProject: ctx.options.providerProject,
+    });
+    if (!registration) {
+      log(ctx.options, "no device push token on this platform");
+      return { token: null, reason: "token_unavailable" };
+    }
+    ctx.token = registration.token;
+    ctx.client.setPushToken(registration);
+    return { token: registration.token };
+  } catch (error) {
+    log(ctx.options, `no device push token: ${String(error)}`);
     return { token: null, reason: "token_unavailable", error };
   }
 }

@@ -12,6 +12,7 @@ export default defineConfig({
       // Native modules: controllable fakes.
       "expo-notifications": root("./test/expo-notifications.ts"),
       "expo-constants": root("./test/expo-constants.ts"),
+      "expo-application": root("./test/expo-application.ts"),
     },
   },
   test: {

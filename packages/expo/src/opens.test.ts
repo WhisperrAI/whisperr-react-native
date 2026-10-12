@@ -1,10 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WhisperrClient } from "@whisperr/react-native";
-import { __tap, DEFAULT_ACTION_IDENTIFIER, fake, type NotificationResponse } from "../test/expo-notifications.js";
+import { AppState } from "../../../test/react-native.js";
+import {
+  __receive,
+  __tap,
+  DEFAULT_ACTION_IDENTIFIER,
+  fake,
+  type NotificationResponse,
+} from "../test/expo-notifications.js";
 import {
   __resetHandledNotifications,
   deepLinkToHref,
   subscribeToWhisperrNotificationOpens,
+  subscribeToWhisperrNotificationReceipts,
   type WhisperrNotificationOpen,
 } from "./opens.js";
 
@@ -23,7 +31,10 @@ beforeEach(() => {
   );
 });
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  AppState.currentState = "active";
+});
 
 function makeClient(): WhisperrClient {
   const client = new WhisperrClient({
@@ -112,6 +123,99 @@ describe("subscribeToWhisperrNotificationOpens", () => {
     subscribeToWhisperrNotificationOpens((o) => opens.push(o.messageId), { client })();
     __tap(response("n6", { whisperr_message_id: "msg_6" }));
     expect(opens).toEqual([]);
+  });
+});
+
+describe("push contract v2: action_id, cold_start, and the stale cold-start response", () => {
+  it("the launch tap is a cold start with the default action; it is cleared after handling", async () => {
+    fake.lastResponse = response("n1", { whisperr_message_id: "msg_1" });
+    const client = makeClient();
+    const stop = subscribeToWhisperrNotificationOpens(() => {}, { client });
+    await settle(client);
+    expect(pushOpens()[0].properties).toMatchObject({ action_id: "default", cold_start: true });
+    expect(fake.clearCalls).toBe(1);
+    expect(fake.lastResponse).toBeNull();
+    stop();
+  });
+
+  it("a tap while running is not a cold start; a button tap sends its action id", async () => {
+    const client = makeClient();
+    const opens: WhisperrNotificationOpen[] = [];
+    const stop = subscribeToWhisperrNotificationOpens((o) => opens.push(o), { client });
+    await settle(client);
+    __tap(response("n2", { whisperr_message_id: "msg_2" }, "claim_offer"));
+    await settle(client);
+    expect(pushOpens()[0].properties).toMatchObject({ action_id: "claim_offer", cold_start: false });
+    expect(opens[0]?.actionId).toBe("claim_offer");
+    stop();
+  });
+
+  it("does not clear another provider's response, or when clearLastResponse is false", async () => {
+    fake.lastResponse = response("n3", { campaign: "other-provider" });
+    const client = makeClient();
+    subscribeToWhisperrNotificationOpens(() => {}, { client })();
+    await settle(client);
+    expect(fake.clearCalls).toBe(0);
+
+    __resetHandledNotifications();
+    fake.lastResponse = response("n4", { whisperr_message_id: "msg_4" });
+    subscribeToWhisperrNotificationOpens(() => {}, { client, clearLastResponse: false })();
+    await settle(client);
+    expect(fake.clearCalls).toBe(0);
+  });
+
+  it("routes one message once, also when it arrives under two notification ids", async () => {
+    const client = makeClient();
+    const opens: string[] = [];
+    const stop = subscribeToWhisperrNotificationOpens((o) => opens.push(o.messageId), { client });
+    await settle(client);
+    __tap(response("n5", { whisperr_message_id: "msg_5" }));
+    __tap(response("n5-copy", { whisperr_message_id: "msg_5" }));
+    await settle(client);
+    expect(opens).toEqual(["msg_5"]);
+    stop();
+  });
+});
+
+describe("subscribeToWhisperrNotificationReceipts", () => {
+  function notification(id: string, data: Record<string, unknown>) {
+    return { request: { identifier: id, content: { data } } };
+  }
+
+  it("sends push_received once per Whisperr message that arrives in the foreground", async () => {
+    // push_received is an automatic event: it needs the automatic events on.
+    const client = new WhisperrClient({
+      apiKey: "wrk_test",
+      flushIntervalMs: 0,
+      flushOnAppBackground: false,
+      maxRetries: 0,
+    });
+    client.identify("user_1");
+    const stop = subscribeToWhisperrNotificationReceipts({ client });
+    __receive(notification("n1", { whisperr_message_id: "msg_1" }));
+    __receive(notification("n1", { whisperr_message_id: "msg_1" }));
+    __receive(notification("n2", { campaign: "other-provider" }));
+    AppState.currentState = "background";
+    __receive(notification("n3", { whisperr_message_id: "msg_3" }));
+    await settle(client);
+    const received = events.filter((e) => e.event_type === "push_received");
+    expect(received.map((e) => e.properties)).toEqual([
+      expect.objectContaining({ whisperr_message_id: "msg_1", foreground: true, source: "foreground" }),
+    ]);
+    stop();
+    AppState.currentState = "active";
+    __receive(notification("n4", { whisperr_message_id: "msg_4" }));
+    await settle(client);
+    expect(events.filter((e) => e.event_type === "push_received")).toHaveLength(1);
+  });
+
+  it("sends nothing while the automatic events are off", async () => {
+    const client = makeClient(); // trackAppLifecycleEvents: false
+    const stop = subscribeToWhisperrNotificationReceipts({ client });
+    __receive(notification("n1", { whisperr_message_id: "msg_1" }));
+    await settle(client);
+    expect(events.filter((e) => e.event_type === "push_received")).toEqual([]);
+    stop();
   });
 });
 

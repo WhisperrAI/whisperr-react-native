@@ -3,6 +3,13 @@ import { __setLocaleIdentifier } from "../test/react-native.js";
 import { WhisperrClient } from "./client.js";
 import { deviceTraits, normalizeLocaleTag } from "./device.js";
 
+// Detected push token fields are environment-dependent; legacy harnesses run
+// with environment detection off (whisperr-spec push.json, v2.json).
+vi.mock("./push-environment.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./push-environment.js")>()),
+  detectPushEnvironment: () => ({ providerProject: () => undefined }),
+}));
+
 /** Pretend the JS engine's Intl reports this zone + locale (undefined = no Intl at all). */
 function stubIntl(resolved: { timeZone?: string; locale?: string } | undefined) {
   if (!resolved) {

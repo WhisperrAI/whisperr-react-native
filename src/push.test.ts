@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { loadFixture, SPEC_REF, supersededIn } from "../test/spec.js";
 import { WhisperrClient } from "./client.js";
 import type { PushPermissionStatus } from "./types.js";
 
@@ -14,8 +15,15 @@ vi.mock("./device.js", async (importOriginal) => ({
 }));
 import { MemoryStorage } from "./storage.js";
 
+// Detected push token fields are environment-dependent; legacy harnesses run
+// with environment detection off (whisperr-spec push.json, v2.json).
+vi.mock("./push-environment.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./push-environment.js")>()),
+  detectPushEnvironment: () => ({ providerProject: () => undefined }),
+}));
+
 const SPEC_URL =
-  "https://raw.githubusercontent.com/WhisperrAI/whisperr-spec/main/conformance/push.json";
+  `https://raw.githubusercontent.com/WhisperrAI/whisperr-spec/${SPEC_REF}/conformance/push.json`;
 
 // Real fetch captured before we stub the global for request capture.
 const realFetch = globalThis.fetch.bind(globalThis);
@@ -57,11 +65,17 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+// Contract v2: the anonymousPush section of v2.json (run by v2.test.ts)
+// replaces the legacy cases it lists in `supersedes`.
+const v2 = await loadFixture<{ sections: Record<string, { supersedes?: string[] }> }>("v2.json", "WHISPERR_V2_SPEC_PATH");
+const superseded = supersededIn("push.json", Object.values(v2.sections));
+
 describe("push-token conformance (whisperr-spec)", () => {
-  it("captures, buffers, dedups, and rotates push tokens per the spec", async () => {
+  it("captures, dedups, and rotates push tokens per the spec", async () => {
     const spec = await loadSpec();
     expect(spec.cases.length).toBeGreaterThan(0);
-    await runCases(spec.cases);
+    expect(superseded.size).toBeGreaterThan(0);
+    await runCases(spec.cases.filter((c) => !superseded.has(c.name)));
   }, 20000);
 
   it("sends the token kind, platform, and push_env per the spec (kindCases)", async () => {

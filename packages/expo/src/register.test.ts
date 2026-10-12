@@ -2,16 +2,27 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WhisperrClient } from "@whisperr/react-native";
 import { __setAppState, __setPlatform } from "../../../test/react-native.js";
 import Constants, { ExecutionEnvironment } from "../test/expo-constants.js";
+import { __setApplicationId, fakeApplication } from "../test/expo-application.js";
 import { __rotateDeviceToken, fake, IosAuthorizationStatus, perm } from "../test/expo-notifications.js";
-import { registerForPushNotifications, stopPushNotificationUpdates, toPermissionStatus } from "./register.js";
+import {
+  registerForPushNotifications,
+  requestPushAuthorization,
+  stopPushNotificationUpdates,
+  toPermissionStatus,
+  toWhisperrPushToken,
+} from "./register.js";
 
 const EXPO = "ExponentPushToken[aaaaaaaaaaaaaaaaaaaaaa]";
+/** The app id (expo-application) and the EAS project id every Expo token carries. */
+const IDS = { client_app_id: "com.example.app", provider_project: "proj-123" };
 
 let identifies: any[] = [];
 let events: any[] = [];
 
 beforeEach(() => {
   fake.reset();
+  fakeApplication.reset();
+  __setApplicationId("com.example.app");
   identifies = [];
   events = [];
   __setPlatform({ OS: "ios", Version: "18.2" });
@@ -80,7 +91,7 @@ describe("registerForPushNotifications", () => {
     expect(reports()).toEqual([
       {
         external_user_id: "user_1",
-        channels: [{ channel: "push", address: EXPO, opted_in: true, kind: "expo", platform: "ios" }],
+        channels: [{ channel: "push", address: EXPO, opted_in: true, kind: "expo", platform: "ios", ...IDS }],
       },
     ]);
   });
@@ -174,7 +185,7 @@ describe("registerForPushNotifications", () => {
     expect(reports()).toEqual([
       {
         external_user_id: "user_1",
-        channels: [{ channel: "push", address: EXPO, opted_in: true, kind: "expo", platform: "ios" }],
+        channels: [{ channel: "push", address: EXPO, opted_in: true, kind: "expo", platform: "ios", ...IDS }],
       },
     ]);
     expect(permissionEvents()).toEqual([
@@ -215,6 +226,7 @@ describe("registerForPushNotifications", () => {
         opted_in: true,
         kind: "expo",
         platform: "ios",
+        ...IDS,
       },
     ]);
   });
@@ -244,5 +256,100 @@ describe("toPermissionStatus", () => {
     expect(toPermissionStatus(perm("granted") as never)).toBe("granted");
     expect(toPermissionStatus(perm("denied") as never)).toBe("denied");
     expect(toPermissionStatus(perm("undetermined") as never)).toBe("undetermined");
+  });
+});
+
+describe("push contract v2 (client_app_id, provider_project, push_env)", () => {
+  it("sends the EAS project id as provider_project; an explicit providerProject wins", async () => {
+    const client = await makeClient();
+    await registerForPushNotifications({ client, providerProject: "other-proj" });
+    await settle(client);
+    expect(reports()[0].channels[0]).toMatchObject({ provider_project: "other-proj", client_app_id: "com.example.app" });
+  });
+
+  it("leaves client_app_id out when expo-application does not know it", async () => {
+    __setApplicationId(null);
+    const client = await makeClient();
+    await registerForPushNotifications({ client });
+    await settle(client);
+    expect(reports()[0].channels[0]).not.toHaveProperty("client_app_id");
+    expect(reports()[0].channels[0]).toMatchObject({ provider_project: "proj-123" });
+  });
+
+  it("tokenType device: an iOS APNs token with push_env from the build's entitlement", async () => {
+    const client = await makeClient();
+    const result = await registerForPushNotifications({ client, tokenType: "device" });
+    await settle(client);
+    expect(result).toEqual({ status: "granted", token: "a1b2c3d4" });
+    expect(fake.tokenCalls).toHaveLength(0); // no Expo token
+    expect(reports()[0].channels).toEqual([
+      {
+        channel: "push",
+        address: "a1b2c3d4",
+        opted_in: true,
+        kind: "apns",
+        platform: "ios",
+        push_env: "sandbox",
+        client_app_id: "com.example.app",
+      },
+    ]);
+  });
+
+  it("tokenType device: an Android FCM token with the Firebase project the app passes", async () => {
+    __setPlatform({ OS: "android", Version: 34, constants: { Release: "14" } });
+    fake.deviceToken = { type: "android", data: "fcm-token-1" };
+    const client = await makeClient();
+    await registerForPushNotifications({ client, tokenType: "device", providerProject: "my-firebase" });
+    await settle(client);
+    expect(reports()[0].channels).toEqual([
+      {
+        channel: "push",
+        address: "fcm-token-1",
+        opted_in: true,
+        kind: "fcm",
+        platform: "android",
+        client_app_id: "com.example.app",
+        provider_project: "my-firebase",
+      },
+    ]);
+  });
+
+  it("toWhisperrPushToken maps the APNs environment and omits an unknown one", async () => {
+    fakeApplication.pushEnvironment = "production";
+    expect(await toWhisperrPushToken({ type: "ios", data: "aa" })).toEqual({
+      token: "aa",
+      kind: "apns",
+      platform: "ios",
+      pushEnv: "production",
+      clientAppId: "com.example.app",
+    });
+    fakeApplication.pushEnvironment = null; // the simulator
+    expect(await toWhisperrPushToken({ type: "ios", data: "aa" })).not.toHaveProperty("pushEnv");
+    fakeApplication.pushEnvironmentError = new Error("no native module");
+    expect(await toWhisperrPushToken({ type: "ios", data: "aa" })).not.toHaveProperty("pushEnv");
+    expect(await toWhisperrPushToken({ type: "web", data: "aa" })).toBeNull();
+    expect(await toWhisperrPushToken({ type: "ios", data: "  " })).toBeNull();
+  });
+});
+
+describe("requestPushAuthorization", () => {
+  it("asks for provisional delivery and reports the answer", async () => {
+    fake.afterRequest = perm("granted", { ios: IosAuthorizationStatus.PROVISIONAL });
+    const client = await makeClient();
+    const status = await requestPushAuthorization({ client, provisional: true });
+    await settle(client);
+    expect(status).toBe("provisional");
+    expect(fake.requestCalls).toEqual([
+      { ios: { allowAlert: true, allowBadge: true, allowSound: true, allowProvisional: true } },
+    ]);
+    expect(permissionEvents()).toEqual([{ status: "provisional" }]);
+  });
+
+  it("registerForPushNotifications({ provisional }) asks for quiet delivery", async () => {
+    const client = await makeClient();
+    await registerForPushNotifications({ client, provisional: true });
+    expect(fake.requestCalls).toEqual([
+      { ios: { allowAlert: true, allowBadge: true, allowSound: true, allowProvisional: true } },
+    ]);
   });
 });

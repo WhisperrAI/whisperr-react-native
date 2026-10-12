@@ -3,6 +3,9 @@
  * may already have — never a hard dependency, so the SDK stays pure JS and
  * keeps working in Expo Go and in apps without either package.
  *
+ * The same peers give the bundle id / package name (`clientAppId`), which push
+ * registrations carry as `client_app_id`.
+ *
  * Order: explicit options → `expo-application` → `react-native-device-info`.
  * A value nothing can provide is omitted, never guessed.
  *
@@ -16,6 +19,8 @@
 export interface AppInfo {
   version?: string;
   build?: string;
+  /** The iOS bundle id / Android package name (push `client_app_id`). */
+  clientAppId?: string;
 }
 
 declare const require: (name: string) => unknown;
@@ -50,10 +55,14 @@ export function resolveAppInfo(
   const out: AppInfo = {};
   const version = clean(explicit.version);
   const build = clean(explicit.build);
+  const clientAppId = clean(explicit.clientAppId);
   if (version) out.version = version;
   if (build) out.build = build;
-  if (out.version && out.build) return out;
+  if (clientAppId) out.clientAppId = clientAppId;
+  // Version and build come from one source; never mix two packages' answers.
+  let versionDone = !!(out.version && out.build);
   for (const load of peers) {
+    if (versionDone && out.clientAppId) break;
     let info: AppInfo | undefined;
     try {
       info = load();
@@ -61,35 +70,46 @@ export function resolveAppInfo(
       info = undefined;
     }
     if (!info) continue;
-    if (!out.version && info.version) out.version = info.version;
-    if (!out.build && info.build) out.build = info.build;
-    if (out.version || out.build) break; // one source; never mix two packages' answers
+    if (!versionDone && (info.version || info.build)) {
+      if (!out.version && info.version) out.version = info.version;
+      if (!out.build && info.build) out.build = info.build;
+      versionDone = true;
+    }
+    if (!out.clientAppId && info.clientAppId) out.clientAppId = info.clientAppId;
   }
   return out;
 }
 
-/** expo-application: `nativeApplicationVersion` / `nativeBuildVersion` (string | null). */
+/** expo-application: `nativeApplicationVersion` / `nativeBuildVersion` / `applicationId` (string | null). */
 export function fromExpoApplication(mod: unknown): AppInfo | undefined {
-  const m = unwrapDefault(mod) as { nativeApplicationVersion?: unknown; nativeBuildVersion?: unknown } | undefined;
+  const m = unwrapDefault(mod) as
+    | { nativeApplicationVersion?: unknown; nativeBuildVersion?: unknown; applicationId?: unknown }
+    | undefined;
   if (!m) return undefined;
   const info: AppInfo = {};
   const version = clean(m.nativeApplicationVersion);
   const build = clean(m.nativeBuildVersion);
+  const clientAppId = clean(m.applicationId);
   if (version) info.version = version;
   if (build) info.build = build;
-  return info.version || info.build ? info : undefined;
+  if (clientAppId) info.clientAppId = clientAppId;
+  return info.version || info.build || info.clientAppId ? info : undefined;
 }
 
-/** react-native-device-info: `getVersion()` / `getBuildNumber()`. */
+/** react-native-device-info: `getVersion()` / `getBuildNumber()` / `getBundleId()`. */
 export function fromDeviceInfo(mod: unknown): AppInfo | undefined {
-  const m = unwrapDefault(mod) as { getVersion?: unknown; getBuildNumber?: unknown } | undefined;
+  const m = unwrapDefault(mod) as
+    | { getVersion?: unknown; getBuildNumber?: unknown; getBundleId?: unknown }
+    | undefined;
   if (!m) return undefined;
   const info: AppInfo = {};
   const version = typeof m.getVersion === "function" ? clean(safeCall(m.getVersion)) : undefined;
   const build = typeof m.getBuildNumber === "function" ? clean(safeCall(m.getBuildNumber)) : undefined;
+  const clientAppId = typeof m.getBundleId === "function" ? clean(safeCall(m.getBundleId)) : undefined;
   if (version) info.version = version;
   if (build) info.build = build;
-  return info.version || info.build ? info : undefined;
+  if (clientAppId) info.clientAppId = clientAppId;
+  return info.version || info.build || info.clientAppId ? info : undefined;
 }
 
 function unwrapDefault(mod: unknown): unknown {

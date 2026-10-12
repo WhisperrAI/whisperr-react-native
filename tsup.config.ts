@@ -1,8 +1,21 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { defineConfig } from "tsup";
 
-/** Optional peers the SDK reads the app version from (src/app-info.ts). */
-const OPTIONAL_PEERS = ["expo-application", "react-native-device-info"];
+/**
+ * Optional peers the SDK loads when the app has them: the app version and id
+ * (src/app-info.ts), the default storage (src/default-storage.ts), the
+ * permission prompt (src/push-authorization.ts), and the push token's
+ * provider project (src/push-environment.ts).
+ */
+const OPTIONAL_PEERS = [
+  "expo-application",
+  "react-native-device-info",
+  "@react-native-async-storage/async-storage",
+  "expo-notifications",
+  "@react-native-firebase/messaging",
+  "expo-constants",
+  "@react-native-firebase/app",
+];
 
 /**
  * esbuild rewrites `require("x")` in ESM output to its `__require("x")` shim.

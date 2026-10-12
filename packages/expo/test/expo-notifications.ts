@@ -29,6 +29,13 @@ export interface NotificationPermissionsStatus {
   ios?: { status: IosAuthorizationStatus };
 }
 export type IosNotificationPermissionsRequest = Record<string, boolean>;
+export interface DevicePushToken {
+  type: "ios" | "android" | "web";
+  data: unknown;
+}
+export interface Notification {
+  request: { identifier: string; content: { data: Record<string, unknown> } };
+}
 export interface NotificationResponse {
   actionIdentifier: string;
   notification: { request: { identifier: string; content: { data: Record<string, unknown> } } };
@@ -46,6 +53,9 @@ export const fake = {
   tokenError: null as Error | null,
   tokenCalls: [] as unknown[],
   lastResponse: null as NotificationResponse | null,
+  clearCalls: 0,
+  deviceToken: { type: "ios", data: "a1b2c3d4" } as DevicePushToken,
+  receivedListeners: new Set<Listener<Notification>>(),
   responseListeners: new Set<Listener<NotificationResponse>>(),
   tokenListeners: new Set<Listener<{ type: string; data: unknown }>>(),
   reset() {
@@ -57,6 +67,9 @@ export const fake = {
     this.tokenError = null;
     this.tokenCalls = [];
     this.lastResponse = null;
+    this.clearCalls = 0;
+    this.deviceToken = { type: "ios", data: "a1b2c3d4" };
+    this.receivedListeners.clear();
     this.responseListeners.clear();
     this.tokenListeners.clear();
   },
@@ -106,6 +119,27 @@ export function addPushTokenListener(listener: Listener<{ type: string; data: un
 
 export async function getLastNotificationResponseAsync(): Promise<NotificationResponse | null> {
   return fake.lastResponse;
+}
+
+export function clearLastNotificationResponse(): void {
+  fake.clearCalls++;
+  fake.lastResponse = null;
+}
+
+export async function getDevicePushTokenAsync(): Promise<DevicePushToken> {
+  if (fake.tokenError) throw fake.tokenError;
+  for (const l of [...fake.tokenListeners]) l(fake.deviceToken);
+  return fake.deviceToken;
+}
+
+export function addNotificationReceivedListener(listener: Listener<Notification>) {
+  fake.receivedListeners.add(listener);
+  return { remove: () => void fake.receivedListeners.delete(listener) };
+}
+
+/** Test hook: a notification arrives while the app runs. */
+export function __receive(notification: Notification): void {
+  for (const l of [...fake.receivedListeners]) l(notification);
 }
 
 export function addNotificationResponseReceivedListener(listener: Listener<NotificationResponse>) {

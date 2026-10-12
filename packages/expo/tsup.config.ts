@@ -3,6 +3,7 @@ import { defineConfig } from "tsup";
 const external = [
   "@whisperr/react-native",
   "expo",
+  "expo-application",
   "expo-constants",
   "expo-notifications",
   "react",

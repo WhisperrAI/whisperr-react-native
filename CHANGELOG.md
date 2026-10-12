@@ -1,6 +1,70 @@
 # Changelog
 
-## Unreleased
+## 0.5.0
+
+Contract v2 (whisperr-spec `v2.json`). **Release this version only after the
+Whisperr backend with contract v2 is live**: an older server rejects the
+anonymous identify and the new push fields with `400`.
+
+- **Storage by default.** Without a `storage` option the SDK uses
+  `@react-native-async-storage/async-storage` when the app has it installed
+  (an optional peer, loaded with a guarded `require`). A passed `storage`
+  still wins. With neither, the SDK stays in memory and logs one warning in
+  development; it never crashes. Before, the user id was lost at each restart
+  when the app passed no `storage`. Apps that passed no storage and run 0.5.0
+  for the first time have no stored app version, so that start can report
+  `app_installed` once.
+- **Restore identify at start.** With a stored user and no opt-out, the SDK
+  queues one identify at start: `external_user_id`, `anonymous_id`, and the
+  restore traits (device `timezone` / `locale` + `app_language`). It skips it
+  when the app calls `identify()` before the SDK finished its storage read,
+  and when the same user got the same restore traits less than 24 hours ago
+  (a persisted restore record; `reset()` and `optOut()` delete it). Offline
+  it waits in the persisted queue, and a queued one is not doubled.
+- **`setAppLanguage(tag | null)`.** Stores the language the user picked in the
+  app (BCP 47, `_` read as `-`) and sends it as `traits.app_language`: a
+  partial identify with a user, an anonymous identify without one. Every later
+  identify and the restore identify carry it; a caller-supplied
+  `traits.app_language` wins. Same value: nothing sent. `null` clears it.
+- **Anonymous push tokens.** `setPushToken()` before `identify()` sends an
+  anonymous identify (`anonymous_id` + the push channel) at once, instead of
+  holding the token in memory. The dedupe pair is now (subject, token).
+  `identify()` carries a token registered under the anonymous id and promotes
+  that id. `reset()` opts the token out for the old user (or old anonymous
+  id), rotates the anonymous id, and opts the token in under the new one.
+  A `denied` permission before login opts the anonymous token out.
+- **Push token fields.** Every opted-in push entry carries `platform`. New:
+  `client_app_id` (option `clientAppId`, else `expo-application` /
+  `react-native-device-info`) and `provider_project` (the EAS project id from
+  `expo-constants` for Expo tokens, the Firebase project id from
+  `@react-native-firebase/app` for FCM tokens; never for APNs). Both can be
+  passed in the object form of `setPushToken()`. A token with less metadata
+  than the last one sent never downgrades it.
+- **Re-registration.** The same token is sent again at most once every 7 days,
+  at launch (the pair stores `sentAt`). A pair stored by 0.4.x has no `sentAt`
+  and is sent once after the upgrade.
+- **`push_opened`** carries `action_id` (`default`, or the button id from an
+  expo-notifications response or `trackPushOpened(data, { actionId })`) and
+  `cold_start` (`trackPushOpened(data, { coldStart })`; default: true in the
+  first 10 seconds after start with no background since). The return value
+  has `actionId` when known.
+- **`trackPushReceived(data, { foreground, source })`** sends the new
+  automatic event `push_received` once per `whisperr_message_id`, also across
+  restarts. `trackAppLifecycleEvents: false` stops it.
+- **`requestPushAuthorization({ provisional })`** shows the OS prompt through
+  `expo-notifications` or `@react-native-firebase/messaging` and reports the
+  answer. Resolves `null` when neither is installed.
+- **Version context.** Every event carries `app_version`, `app_build`,
+  `platform`, `sdk_name`, and `sdk_version` in `context` (no value, no key).
+  `context.library` stays. The SDK never puts `locale` in `context`.
+- New optional peers: `@react-native-async-storage/async-storage`,
+  `expo-constants`, `expo-notifications`, `@react-native-firebase/app`,
+  `@react-native-firebase/messaging`.
+- The test suite runs whisperr-spec `v2.json` (restore identify, app language,
+  anonymous push, push registration, version context) and `automatic.json`
+  `pushEventsV2`, and skips the legacy cases they supersede.
+
+Also in 0.5.0 (merged after 0.4.0, not released before):
 
 - **Removed: the identify trait `push_permission`.** `setPushPermission()` no
   longer writes it. An app or a dashboard filter that reads this trait gets no

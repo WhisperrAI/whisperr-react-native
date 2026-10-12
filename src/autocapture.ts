@@ -16,6 +16,16 @@ export const APP_BACKGROUNDED = "app_backgrounded";
 export const SCREEN_VIEWED = "screen_viewed";
 export const PUSH_OPENED = "push_opened";
 export const PUSH_PERMISSION_CHANGED = "push_permission_changed";
+export const PUSH_RECEIVED = "push_received";
+
+/** The action id a tap on the notification itself reports. */
+export const DEFAULT_PUSH_ACTION = "default";
+
+/** Platform ids for "the user tapped the notification itself". */
+const DEFAULT_ACTION_IDS = new Set([
+  "expo.modules.notifications.actions.DEFAULT", // expo-notifications
+  "com.apple.UNNotificationDefaultActionIdentifier", // iOS
+]);
 
 /**
  * The flat properties every automatic event carries (canonical values shared
@@ -128,9 +138,22 @@ export function extractPushOpened(input: unknown): PushOpenedPayload | undefined
     // Whisperr sends the link as `whisperr_deep_link`; `deep_link` is the
     // spec's name and what earlier backends sent.
     const deepLink = stringValue(data.whisperr_deep_link) ?? stringValue(data.deep_link);
-    return deepLink ? { messageId, deepLink } : { messageId };
+    const actionId = extractActionId(input);
+    return { messageId, ...(deepLink ? { deepLink } : {}), ...(actionId ? { actionId } : {}) };
   }
   return undefined;
+}
+
+/**
+ * The action of a notification response: an expo-notifications response
+ * (`actionIdentifier`) or a OneSignal click event (`result.actionId`).
+ * The platform's "tapped the notification itself" id becomes `"default"`.
+ */
+export function extractActionId(input: unknown): string | undefined {
+  const root = asMap(input);
+  const raw = stringValue(root?.actionIdentifier) ?? stringValue(asMap(root?.result)?.actionId);
+  if (!raw) return undefined;
+  return DEFAULT_ACTION_IDS.has(raw) ? DEFAULT_PUSH_ACTION : raw;
 }
 
 function candidateMaps(input: unknown): Record<string, unknown>[] {
