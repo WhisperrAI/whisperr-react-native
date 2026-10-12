@@ -1,12 +1,20 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { SPEC_REF } from "../test/spec.js";
 import { WhisperrClient } from "./client.js";
 import { MemoryStorage } from "./storage.js";
 import type { WhisperrError } from "./types.js";
 
+// Device-derived defaults are environment-dependent; the harness turns them
+// off (as every legacy harness does), so the seeded restore record matches.
+vi.mock("./device.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./device.js")>()),
+  deviceTraits: () => ({}),
+}));
+
 const SPEC_URL =
-  "https://raw.githubusercontent.com/WhisperrAI/whisperr-spec/main/conformance/behavior.json";
+  `https://raw.githubusercontent.com/WhisperrAI/whisperr-spec/${SPEC_REF}/conformance/behavior.json`;
 
 // Real fetch captured before we stub the global for request capture.
 const realFetch = globalThis.fetch.bind(globalThis);
@@ -75,8 +83,15 @@ describe("behavior conformance (whisperr-spec)", () => {
       status = c.firstResponse.status;
 
       // Identity restored from a previous launch — no identify op in the queue.
+      // Contract v2 queues a restore identify at start unless the same user
+      // was identified with the same restore traits less than 24 hours ago:
+      // seed that record so the queue holds only the scenario's event.
       const storage = new MemoryStorage();
       storage.setItem("whisperr.user_id", c.scenario.externalUserId);
+      storage.setItem(
+        "whisperr.restore_record",
+        JSON.stringify({ userId: c.scenario.externalUserId, traits: {}, at: Date.now() }),
+      );
 
       const client = new WhisperrClient({
         apiKey: "wrk_test",

@@ -4,14 +4,14 @@ Reliable, Expo-friendly churn-signal event tracking for React Native — **zero
 native code**, works in Expo Go, bare React Native, and dev clients alike.
 
 ```bash
-npm i @whisperr/react-native
+npm i @whisperr/react-native @react-native-async-storage/async-storage
 ```
 
 ```tsx
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Whisperr } from "@whisperr/react-native";
 
-const whisperr = Whisperr.init({ apiKey: "wpk_…", storage: AsyncStorage });
+// Uses AsyncStorage automatically when it is installed.
+const whisperr = Whisperr.init({ apiKey: "wpk_…" });
 
 // after the user logs in / on session restore
 whisperr.identify("user_123", { traits: { first_name: "Ada", plan: "pro" } });
@@ -31,7 +31,7 @@ whisperr.reset();
 - **Anonymous → identified** — events before login are sent right away under an
   anonymous id; `identify()` promotes them to the user, `reset()` starts a new
   anonymous visitor.
-- **Never loses events** — durable on-device queue (via your storage adapter),
+- **Never loses events** — durable on-device queue (AsyncStorage by default),
   automatic flush when the app backgrounds, batching, retry/backoff, and a
   stable `$message_id` per event so the backend dedups at-least-once retries.
 - **Consent-friendly** — `optIn()` / `optOut()` persist across launches and
@@ -43,20 +43,25 @@ whisperr.reset();
 
 ## Storage (durability)
 
-The SDK never imports a native module itself — you hand it any
-AsyncStorage-compatible adapter (`getItem`/`setItem`/`removeItem`):
+The SDK keeps the user id, the anonymous id, the queue, the push token pair,
+the opt-out choice, and the app language on the device.
+
+- **Default:** when `@react-native-async-storage/async-storage` is installed,
+  the SDK uses it. You do not pass anything. In Expo:
+  `npx expo install @react-native-async-storage/async-storage`.
+- **Your own adapter:** pass any object with `getItem` / `setItem` /
+  `removeItem` (MMKV, `expo-sqlite/kv-store`). It wins over AsyncStorage.
 
 ```ts
-// The common case:
-import AsyncStorage from "@react-native-async-storage/async-storage";
-Whisperr.init({ apiKey: "wpk_…", storage: AsyncStorage });
-
-// Or MMKV, expo-sqlite/kv-store, SecureStore — anything with the same shape.
+Whisperr.init({ apiKey: "wpk_…", storage: myMmkvAdapter });
 ```
 
-Without `storage` the SDK still works, but the queue is memory-only: events
-captured right before a crash or app kill are lost. In Expo, install the
-adapter with `npx expo install @react-native-async-storage/async-storage`.
+- **Neither:** the SDK works in memory only. The user id is lost at each app
+  restart, and events captured right before a crash or kill are lost. The SDK
+  logs one warning in development. It never crashes.
+
+AsyncStorage is an optional peer: the SDK never installs it, and a missing or
+unlinked package is not an error.
 
 ## React bindings
 
@@ -65,7 +70,7 @@ import { WhisperrProvider, useWhisperr } from "@whisperr/react-native";
 
 export default function App() {
   return (
-    <WhisperrProvider options={{ apiKey: "wpk_…", storage: AsyncStorage }}>
+    <WhisperrProvider options={{ apiKey: "wpk_…" }}>
       <Root />
     </WhisperrProvider>
   );
@@ -87,13 +92,18 @@ On by default. Turn them off with `trackAppLifecycleEvents: false`.
 | `app_updated` | First launch after the app version or build changed | `previous_version`, `previous_build` |
 | `app_opened` | The app comes to the foreground | `cold_start` (true for the first foreground of the process) |
 | `app_backgrounded` | The app goes to the background | `foreground_ms` |
+| `push_received` | You call `trackPushReceived()` for a Whisperr push | `whisperr_message_id`, `foreground`, `source` |
+
+Every event (also your own `track()` calls) carries `app_version`,
+`app_build`, `platform`, `sdk_name`, and `sdk_version` in `context`, when the
+SDK knows them. It never puts `locale` in `context`.
 
 Every automatic event also carries these flat properties, when the device can
 provide them: `app_version`, `app_build`, `platform` and `os_name` (`"ios"`,
 `"android"`, `"web"`), `os_version`, `sdk_name`, `sdk_version`, `locale`, and
 `timezone` (IANA name; `timezone_offset_minutes` when there is none).
 
-- `app_installed` / `app_updated` need durable `storage`: the SDK compares the
+- `app_installed` / `app_updated` need durable storage: the SDK compares the
   version with the one it stored at the last launch. An app that upgrades from
   SDK 0.2.x stores the version silently, so it never reports a false install.
 - A launch into the background (headless JS, background fetch) is not an open.
@@ -158,6 +168,37 @@ explicit channel.
 
 `identify()` also sends `traits.timezone` (IANA, via `Intl`) and `traits.locale` (BCP 47, via `Intl` or `I18nManager`) by default when the runtime can provide them — pass your own `traits.timezone` / `traits.locale` to override, and nothing is sent for a value the device can't supply.
 
+### Identify at every app start
+
+At each app start, the SDK identifies the stored user again (the **restore
+identify**): `external_user_id`, the anonymous id, and the traits from the
+device plus the app language. This keeps the timezone, the locale, and the
+language current while the user stays signed in.
+
+- It skips the restore identify when you call `identify()` in the same tick
+  as `Whisperr.init()`, and when the same traits reached the server less than
+  24 hours ago.
+- It goes through the same persisted queue. Offline, it waits.
+- Opted out, or no stored user: nothing is sent.
+- The SDK cannot know a user who signed in before you installed the SDK. Call
+  `identify()` on session restore too.
+
+### App language
+
+Tell Whisperr the language the user picked in your app. It is not the device
+locale. Whisperr writes messages in this language.
+
+```ts
+whisperr.setAppLanguage("pt-BR"); // BCP 47; "pt_BR" also works
+whisperr.setAppLanguage(null);    // clear the stored value
+```
+
+- The SDK stores it and sends it at once: as a partial identify for the
+  current user, or before login as an anonymous identify.
+- Every later `identify()` carries it as `traits.app_language`. A
+  `traits.app_language` that you pass wins.
+- The same value again sends nothing. An invalid tag is ignored.
+
 ## Push notifications
 
 **Expo app?** Use [`@whisperr/expo`](packages/expo/README.md). It sets up
@@ -185,12 +226,21 @@ when you know it:
 | Raw APNs device token (hex) | `setPushToken({ token, kind: "apns", pushEnv: "production" })` |
 | OneSignal subscription id | `setPushToken({ token, kind: "onesignal_sub" })` |
 
-- In the object form, `platform` defaults to `Platform.OS`.
+- `platform` is always sent: it defaults to `Platform.OS`.
+- `clientAppId` (sent as `client_app_id`): the iOS bundle id or Android
+  package name. Default: `WhisperrOptions.clientAppId`, else
+  `expo-application` or `react-native-device-info` when installed.
+- `providerProject` (sent as `provider_project`): the Firebase project id
+  (FCM), the EAS project id (Expo), or the OneSignal app id. Default: the EAS
+  project id from `expo-constants` for Expo tokens, the Firebase project id
+  from `@react-native-firebase/app` for FCM tokens. Never for APNs tokens.
+  With these two fields the server catches a token of the wrong app or
+  project before a send.
 - `pushEnv` is the APNs environment: `sandbox` for development-signed builds
   (run from Xcode, development profile), `production` for TestFlight and the
   App Store. The SDK cannot read it, so set it from your build config. Without
   it, Whisperr cannot tell a sandbox token from a production token.
-- A plain string (`setPushToken(token)`) sends the token only. The server then
+- A plain string (`setPushToken(token)`) sends no kind. The server then
   infers the kind from its format.
 - An APNs token needs an APNs provider in Whisperr. An Expo token needs the
   Expo provider.
@@ -198,8 +248,10 @@ when you know it:
 ### Token lifecycle
 
 - Called **after login**, it re-identifies the push channel immediately.
-- Called **before login**, the token is buffered and attached to the next
-  `identify()`.
+- Called **before login**, the token goes out at once in an anonymous
+  identify (`anonymous_id` + the push channel). The next `identify()` carries
+  the token and promotes the anonymous user, so the device can get push
+  before the user signs in.
 - **Token rotation** is handled: the previously sent token is opted out and the
   new one opted in, so stale tokens don't accumulate — and tokens from the
   user's other devices are never touched.
@@ -208,7 +260,11 @@ when you know it:
   persisted through your storage adapter, so the no-op holds **across app
   restarts** — and a rotation that happens after a relaunch still opts out the
   stale token.
-- After `reset()` (logout), call `setPushToken` again once the next user logs in.
+- `reset()` (logout) moves the token: it opts the token out for the old user,
+  makes a new anonymous id, and opts the token in under it.
+- **Re-registration:** the SDK sends the same token again at most once every
+  7 days, at launch. The server uses it to tell a live device from a stale
+  one.
 
 ### Permission
 
@@ -217,6 +273,15 @@ the foreground. A repeated status is a no-op.
 
 ```ts
 whisperr.setPushPermission("granted"); // "granted" | "provisional" | "denied" | "undetermined"
+```
+
+To show the OS prompt, call `requestPushAuthorization()`. It uses
+`expo-notifications` or `@react-native-firebase/messaging`, whichever the app
+has, and reports the answer for you. With `provisional: true`, iOS grants
+quiet delivery (Notification Center only) without a prompt.
+
+```ts
+const status = await whisperr.requestPushAuthorization({ provisional: true }); // null: no package found
 ```
 
 - A new status sends the event `push_permission_changed`. Its `status` uses
@@ -313,9 +378,31 @@ learns which messages work. Pass the data map, or the whole response / message
 object. A push without `whisperr_message_id` did not come from Whisperr and is
 ignored. Calling it twice for the same tap is safe, also across restarts.
 
-It returns `{ messageId, deepLink }` for a Whisperr push (also for a repeated
-tap, and while opted out), or `null`. Route to `deepLink` yourself.
+It returns `{ messageId, deepLink, actionId }` for a Whisperr push (also for
+a repeated tap, and while opted out), or `null`. Route to `deepLink` yourself.
 `parseWhisperrPush(data)` reads the same fields without sending anything.
+
+`push_opened` also carries:
+
+- `action_id`: `default` for a tap on the notification, else the button id.
+  The SDK reads it from an expo-notifications response. Pass it for other
+  libraries: `trackPushOpened(message, { actionId })`.
+- `cold_start`: true when the tap launched the app. Pass it when you know it
+  (for example from `getInitialNotification()`):
+  `trackPushOpened(message, { coldStart: true })`. Without it, the SDK uses
+  true for an open in the first 10 seconds after start with no background
+  since.
+
+### Push receipts
+
+Call `trackPushReceived()` from your foreground notification listener. It
+sends `push_received` (`whisperr_message_id`, `foreground`, `source`) once per
+message, also across restarts. It does not count as user activity. It is an
+automatic event: `trackAppLifecycleEvents: false` stops it.
+
+```ts
+messaging().onMessage((message) => whisperr.trackPushReceived(message)); // foreground: true, source: "foreground"
+```
 
 With `@react-native-firebase/messaging`:
 
@@ -353,7 +440,7 @@ import * as Notifications from "expo-notifications";
 
 useEffect(() => {
   Notifications.getLastNotificationResponseAsync().then((response) => {
-    if (response) whisperr.trackPushOpened(response);
+    if (response) whisperr.trackPushOpened(response, { coldStart: true });
   });
   const sub = Notifications.addNotificationResponseReceivedListener((response) => {
     whisperr.trackPushOpened(response);
@@ -380,7 +467,7 @@ useEffect(() => {
 ```ts
 Whisperr.init({
   apiKey: "wpk_…",
-  storage: AsyncStorage,      // durable queue + identity (recommended)
+  storage: myAdapter,         // optional; default AsyncStorage when installed
   flushAt: 20,                // flush when this many events are queued
   flushIntervalMs: 10000,     // periodic flush
   flushOnAppBackground: true, // flush when the app leaves the foreground
@@ -389,6 +476,7 @@ Whisperr.init({
   trackAppLifecycleEvents: true, // app_installed / updated / opened / backgrounded
   appVersion: "2.4.1",        // optional; else read from expo-application / react-native-device-info
   appBuild: "241",
+  clientAppId: "com.acme.app", // optional; sent with push tokens as client_app_id
   onError: (e) => console.warn("whisperr:", e.type, e.message),
 });
 ```
@@ -398,7 +486,8 @@ directly for explicit lifetimes (call `close()` when done).
 
 ## Development
 
-The test suite consumes the shared `whisperr-spec` fixtures:
+The test suite consumes the shared `whisperr-spec` fixtures (wire, behavior,
+anonymous, push, automatic, and the contract v2 file `v2.json`):
 
 ```bash
 WHISPERR_SPEC_PATH=../whisperr-spec/conformance/wire.json npm test

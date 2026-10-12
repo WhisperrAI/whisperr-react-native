@@ -15,6 +15,10 @@ export interface WhisperrChannel {
   platform?: PushPlatform;
   /** Push only: the APNs environment of the token. Sent as `push_env`. */
   pushEnv?: PushEnvironment;
+  /** Push only: the iOS bundle id or Android package name. Sent as `client_app_id`. */
+  clientAppId?: string;
+  /** Push only: the Firebase project id, EAS project id, or OneSignal app id. Sent as `provider_project`. */
+  providerProject?: string;
 }
 
 /**
@@ -45,6 +49,21 @@ export interface PushTokenRegistration {
   platform?: PushPlatform;
   /** APNs tokens only. The SDK never guesses it. */
   pushEnv?: PushEnvironment;
+  /**
+   * The iOS bundle id or Android package name of the app that owns the token.
+   * Defaults to `WhisperrOptions.clientAppId`, then to what `expo-application`
+   * or `react-native-device-info` reports.
+   */
+  clientAppId?: string;
+  /**
+   * The project the token belongs to at the push provider: the Firebase
+   * project id (FCM), the EAS project id (Expo), or the OneSignal app id.
+   * The server uses it to catch a token from the wrong project before a send.
+   * Defaults to what the runtime knows: the EAS project id (`expo-constants`)
+   * for Expo tokens, the Firebase project id (`@react-native-firebase/app`)
+   * for FCM tokens.
+   */
+  providerProject?: string;
 }
 
 /**
@@ -76,6 +95,44 @@ export interface WhisperrPushOpen {
   messageId: string;
   /** The deep link from the push data (`whisperr_deep_link` or `deep_link`), if any. */
   deepLink?: string;
+  /**
+   * The action the user picked: `"default"` for a tap on the notification
+   * itself, else the button (action) id. Read from an expo-notifications
+   * response, or from `PushOpenedOptions.actionId`.
+   */
+  actionId?: string;
+}
+
+/** What the app knows about a notification open. Unknown values stay unset. */
+export interface PushOpenedOptions {
+  /** The button (action) id. Default: read from the payload, else `"default"`. */
+  actionId?: string;
+  /**
+   * True when the tap launched the app from a killed state. Default: true when
+   * the open comes within 10 seconds of the client start and the app was not in
+   * the background since.
+   */
+  coldStart?: boolean;
+}
+
+/** Where a push receipt was seen. */
+export type PushReceivedSource = "foreground" | "nse" | "android_service" | "expo_task";
+
+/** What the app knows about a received push. */
+export interface PushReceivedOptions {
+  /** The app was in the foreground. Default: `AppState.currentState === "active"`. */
+  foreground?: boolean;
+  /** Default: `"foreground"` when `foreground` is true. */
+  source?: PushReceivedSource;
+}
+
+/** Options for requestPushAuthorization(). */
+export interface PushAuthorizationOptions {
+  /**
+   * iOS: ask for provisional (quiet) delivery. iOS shows no prompt; the
+   * notifications go to Notification Center only. Default false.
+   */
+  provisional?: boolean;
 }
 
 export interface IdentifyParams {
@@ -124,8 +181,11 @@ export interface WhisperrOptions {
   baseUrl?: string;
   /**
    * Durable storage for the queue + identity so events survive app restarts.
-   * Pass AsyncStorage (or any WhisperrStorage adapter). Without it the SDK is
-   * fully functional but memory-only: events queued at crash/kill are lost.
+   * Default: `@react-native-async-storage/async-storage` when the app has it
+   * installed. Pass any WhisperrStorage adapter (MMKV, expo-sqlite kv-store)
+   * to use that instead. With neither, the SDK works memory-only: the user id
+   * and events queued at a crash or kill are lost, and it warns once in
+   * development.
    */
   storage?: WhisperrStorage;
   /** Flush when this many sendable events are queued. Default 20. */
@@ -162,6 +222,12 @@ export interface WhisperrOptions {
   appVersion?: string;
   /** The app's build number (e.g. "241"). Same fallback as `appVersion`. */
   appBuild?: string;
+  /**
+   * The iOS bundle id or Android package name, sent with push tokens as
+   * `client_app_id`. Default: read from `expo-application` or
+   * `react-native-device-info` when installed.
+   */
+  clientAppId?: string;
 }
 
 export interface WhisperrError {
@@ -174,15 +240,29 @@ export interface WhisperrError {
 export interface WhisperrApi {
   identify(externalUserId: string, params?: IdentifyParams): void;
   /**
+   * Sets the language the user picked in your app (BCP 47, for example `de`
+   * or `pt-BR`; `_` is read as `-`). It is not the device locale: Whisperr
+   * writes messages in this language. The SDK persists it and sends it with
+   * every identify (a `traits.app_language` you pass wins). A new value is sent
+   * at once: as a partial identify for the current user, or before login as an
+   * anonymous identify. `null` clears the stored value (the server keeps the
+   * last value sent). An invalid tag is ignored.
+   */
+  setAppLanguage(tag: string | null): void;
+  /**
    * Captures the device push token. With a known user it re-identifies the push
    * channel immediately — a rotated token opts out the previous one; a repeated
-   * token is a no-op. The last-sent (user, token) pair is persisted through the
-   * storage adapter, so both hold across app restarts. Before identify() it is
-   * buffered in memory and attached to the next identify().
+   * token is a no-op for 7 days, then it is sent again (re-registration). The
+   * last-sent (subject, token) pair is persisted, so both hold across app
+   * restarts. Before identify() it goes out at once in an anonymous identify
+   * (`anonymous_id` + the push channel); the next identify() carries it.
+   * reset() moves it to the new anonymous id.
    *
-   * - A string sends the token only; the server infers its kind.
-   * - `{ token, kind?, platform?, pushEnv? }` also sends the token type. An Expo
-   *   token gets `kind: "expo"`, and `platform` defaults to `Platform.OS`.
+   * - A string sends no kind; the server infers it.
+   * - `{ token, kind?, platform?, pushEnv?, clientAppId?, providerProject? }`
+   *   also sends the token fields. An Expo token gets `kind: "expo"`.
+   * - `platform` (always), `client_app_id`, and `provider_project` (not for
+   *   APNs) default to what the runtime knows.
    * - An expo-notifications token object (`getExpoPushTokenAsync()` /
    *   `getDevicePushTokenAsync()`) is mapped to `expo`, `apns`, or `fcm`.
    *
@@ -202,6 +282,14 @@ export interface WhisperrApi {
    * for this device; `granted` / `provisional` registers it again.
    */
   setPushPermission(status: PushPermissionStatus): void;
+  /**
+   * Shows the OS notification prompt (or, with `provisional`, asks iOS for
+   * quiet delivery without a prompt) and reports the answer through
+   * setPushPermission(). Uses `expo-notifications` or
+   * `@react-native-firebase/messaging`, whichever the app has. Resolves to the
+   * status, or null when neither package is installed. Never throws.
+   */
+  requestPushAuthorization(options?: PushAuthorizationOptions): Promise<PushPermissionStatus | null>;
   track(eventType: string, properties?: Record<string, unknown>, context?: Record<string, unknown>): void;
   /** Tracks `screen_viewed` with `{ screen_name: name }`. Wire it to your navigator. */
   screen(name: string, properties?: Record<string, unknown>): void;
@@ -217,7 +305,16 @@ export interface WhisperrApi {
    * is a Whisperr push — also for a repeated tap or while opted out, which send
    * nothing. Returns null for other pushes.
    */
-  trackPushOpened(data: unknown): WhisperrPushOpen | null;
+  trackPushOpened(data: unknown, options?: PushOpenedOptions): WhisperrPushOpen | null;
+  /**
+   * Records that a Whisperr push reached the device (`push_received`, with
+   * `whisperr_message_id`, `foreground`, and `source`). Wire it to your
+   * foreground notification listener. Once per message, also across restarts.
+   * A push without `whisperr_message_id` is ignored. It is an automatic event:
+   * `trackAppLifecycleEvents: false` stops it. It does not count as user
+   * activity.
+   */
+  trackPushReceived(data: unknown, options?: PushReceivedOptions): WhisperrPushOpen | null;
   flush(): Promise<void>;
   reset(): void;
   /** Resumes capture after optOut(). The next setPushToken() registers the token again. */
@@ -244,9 +341,21 @@ export interface WhisperrApi {
 
 export interface IdentifyOp {
   kind: "identify";
-  externalUserId: string;
-  /** The anonymous handle this identify promotes (sent as `anonymous_id`). */
+  /** Unset for an anonymous identify (sent under `anonymousId` only). */
+  externalUserId?: string;
+  /**
+   * With `externalUserId`: the anonymous handle this identify promotes. Without
+   * it: the handle this anonymous identify writes to. Sent as `anonymous_id`.
+   */
   anonymousId?: string;
+  /**
+   * Set on a full identify (identify() or the restore identify): the restore
+   * traits (device defaults + app_language) it was built with. After a 2xx
+   * they become the restore record (24-hour throttle).
+   */
+  restoreTraits?: Record<string, unknown>;
+  /** A setAppLanguage() partial identify: after a 2xx it updates the restore record's app_language. */
+  languageUpdate?: boolean;
   /**
    * Set when identify() ran before the persisted anonymous state was read:
    * the promotion decision is made once init resolves.

@@ -69,8 +69,8 @@ describe("normalizePushToken", () => {
     expect(normalizePushToken("  ")).toBeNull();
   });
 
-  it("object form: an Expo token gets kind expo, platform defaults to Platform.OS", () => {
-    expect(normalizePushToken({ token: EXPO })).toEqual({ token: EXPO, kind: "expo", platform: "ios" });
+  it("object form: an Expo token gets kind expo; only what the input says (the client adds detected fields)", () => {
+    expect(normalizePushToken({ token: EXPO })).toEqual({ token: EXPO, kind: "expo" });
     expect(normalizePushToken({ token: "fcm_tok", kind: "fcm", platform: "android" })).toEqual({
       token: "fcm_tok",
       kind: "fcm",
@@ -79,20 +79,24 @@ describe("normalizePushToken", () => {
     expect(normalizePushToken({ token: APNS, kind: "apns", pushEnv: "sandbox" })).toEqual({
       token: APNS,
       kind: "apns",
-      platform: "ios",
       pushEnv: "sandbox",
+    });
+    expect(normalizePushToken({ token: "t", clientAppId: " com.app ", providerProject: "proj" })).toEqual({
+      token: "t",
+      clientAppId: "com.app",
+      providerProject: "proj",
     });
   });
 
   it("object form: never guesses a non-Expo kind, and drops unknown values", () => {
-    expect(normalizePushToken({ token: APNS })).toEqual({ token: APNS, platform: "ios" });
+    expect(normalizePushToken({ token: APNS })).toEqual({ token: APNS });
     expect(
       normalizePushToken({ token: "t", kind: "gcm" as never, platform: "symbian" as never, pushEnv: "debug" as never }),
-    ).toEqual({ token: "t", platform: "ios" });
+    ).toEqual({ token: "t" });
   });
 
   it("maps expo-notifications token objects", () => {
-    expect(normalizePushToken({ type: "expo", data: EXPO })).toEqual({ token: EXPO, kind: "expo", platform: "ios" });
+    expect(normalizePushToken({ type: "expo", data: EXPO })).toEqual({ token: EXPO, kind: "expo" });
     expect(normalizePushToken({ type: "ios", data: APNS })).toEqual({ token: APNS, kind: "apns", platform: "ios" });
     expect(normalizePushToken({ type: "android", data: "fcm_tok" })).toEqual({
       token: "fcm_tok",
@@ -149,8 +153,10 @@ describe("setPushToken with metadata", () => {
       w.setPushToken(token);
       await settle(w);
     }
+    // The client detects the platform for every token (contract v2), so a
+    // bare string already carries it; the object form adds the Expo kind once.
     expect(identifies.slice(1)).toEqual([
-      { external_user_id: "user_1", channels: [{ channel: "push", address: EXPO, opted_in: true }] },
+      { external_user_id: "user_1", channels: [{ channel: "push", address: EXPO, opted_in: true, platform: "ios" }] },
       {
         external_user_id: "user_1",
         channels: [{ channel: "push", address: EXPO, opted_in: true, kind: "expo", platform: "ios" }],
@@ -263,7 +269,8 @@ describe("setPushPermission", () => {
     const w = makeClient({ storage });
     w.setPushToken("fcm_tok_a");
     await settle(w);
-    expect(identifies).toEqual([]); // held back by the stored denied permission
+    // Held back by the stored denied permission: only the restore identify (no channels).
+    expect(identifies).toEqual([{ external_user_id: "user_1", anonymous_id: expect.any(String) }]);
 
     w.setPushPermission("denied");
     w.setPushPermission("denied");

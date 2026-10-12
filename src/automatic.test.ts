@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { SPEC_REF } from "../test/spec.js";
 import { __setAppState, __setPlatform, AppState } from "../test/react-native.js";
 import { SDK_NAME } from "./autocapture.js";
 import { WhisperrClient } from "./client.js";
@@ -16,7 +17,7 @@ vi.mock("./device.js", async (importOriginal) => ({
 }));
 
 const SPEC_URL =
-  "https://raw.githubusercontent.com/WhisperrAI/whisperr-spec/main/conformance/automatic.json";
+  `https://raw.githubusercontent.com/WhisperrAI/whisperr-spec/${SPEC_REF}/conformance/automatic.json`;
 
 const realFetch = globalThis.fetch.bind(globalThis);
 const RealDate = Date;
@@ -31,7 +32,9 @@ type Step =
   | { pushPermission: "authorized" | "provisional" | "denied" | "not_determined" }
   | { reset: true }
   | { optOut: true }
-  | { optIn: true };
+  | { optIn: true }
+  | { receivePush: { data: Record<string, unknown>; source: string; foreground: boolean } }
+  | { openPush: { data: Record<string, unknown>; launchedApp: boolean; actionId?: string } };
 
 interface AutomaticCase {
   name: string;
@@ -39,10 +42,18 @@ interface AutomaticCase {
   config?: { automaticEvents?: boolean };
   device: { osVersion?: string; locale?: string; timezone?: string; timezoneOffsetMinutes?: number };
   steps: Step[];
-  expectedEvents: Array<{ event_type: string; properties: Record<string, unknown> }>;
+  expectedEvents: Array<{ event_type: string; properties: Record<string, unknown>; context?: Record<string, unknown> }>;
 }
 
-async function loadSpec(): Promise<{ cases: AutomaticCase[] }> {
+interface PushEventsV2 {
+  supersedes: string[];
+  cases: AutomaticCase[];
+}
+
+/** Context keys contract v2 governs: a named one must match, an unnamed one must be absent. */
+const GOVERNED = ["app_version", "app_build", "platform", "sdk_name", "sdk_version", "locale"];
+
+async function loadSpec(): Promise<{ cases: AutomaticCase[]; pushEventsV2?: PushEventsV2 }> {
   // automatic.json lives next to wire.json.
   const wire = process.env.WHISPERR_SPEC_PATH;
   const local = process.env.WHISPERR_AUTOMATIC_SPEC_PATH ?? (wire ? join(dirname(wire), "automatic.json") : null);
@@ -76,9 +87,22 @@ afterEach(() => {
 
 const spec = await loadSpec();
 
+// Contract v2: this SDK runs pushEventsV2 and skips the cases it supersedes.
+const pushEventsV2 = spec.pushEventsV2;
+const superseded = new Set(
+  (pushEventsV2?.supersedes ?? []).filter((e) => e.startsWith("automatic.json:")).map((e) => e.split(":")[1]),
+);
+
 describe("automatic events conformance (whisperr-spec)", () => {
   it("has cases", () => expect(spec.cases.length).toBeGreaterThan(0));
-  it.each(spec.cases.map((c) => [c.name, c] as const))("%s", (_name, c) => runCase(c));
+  it.each(spec.cases.filter((c) => !superseded.has(c.name)).map((c) => [c.name, c] as const))("%s", (_name, c) =>
+    runCase(c),
+  );
+});
+
+describe("contract v2 push events (automatic.json pushEventsV2)", () => {
+  it("has cases", () => expect(pushEventsV2?.cases.length ?? 0).toBeGreaterThan(0));
+  it.each((pushEventsV2?.cases ?? []).map((c) => [c.name, c] as const))("%s", (_name, c) => runCase(c));
 });
 
 async function runCase(c: AutomaticCase): Promise<void> {
@@ -152,6 +176,16 @@ async function runCase(c: AutomaticCase): Promise<void> {
       client().optOut();
     } else if ("optIn" in step) {
       client().optIn();
+    } else if ("receivePush" in step) {
+      client().trackPushReceived(step.receivePush.data, {
+        foreground: step.receivePush.foreground,
+        source: step.receivePush.source as "foreground",
+      });
+    } else if ("openPush" in step) {
+      client().trackPushOpened(step.openPush.data, {
+        coldStart: step.openPush.launchedApp,
+        ...(step.openPush.actionId ? { actionId: step.openPush.actionId } : {}),
+      });
     } else {
       throw new Error(`${c.name}: unknown step ${JSON.stringify(step)}`);
     }
@@ -160,6 +194,14 @@ async function runCase(c: AutomaticCase): Promise<void> {
   if (w) await w.close();
 
   for (const event of sent) expect(event.context?.$message_id, `${c.name}: $message_id`).toBeTruthy();
+  const sub = (v: unknown) => (typeof v === "string" && v in PLACEHOLDERS ? PLACEHOLDERS[v] : v);
+  c.expectedEvents.forEach((e, i) => {
+    if (!e.context) return;
+    for (const key of GOVERNED) {
+      if (key in e.context) expect(sent[i]?.context?.[key], `${c.name} event ${i} context.${key}`).toEqual(sub(e.context[key]));
+      else expect(sent[i]?.context, `${c.name} event ${i} context.${key} absent`).not.toHaveProperty(key);
+    }
+  });
   const actual = sent.map((e) => ({ event_type: e.event_type, properties: e.properties ?? {} }));
   const expected = c.expectedEvents.map((e) => ({
     event_type: e.event_type,

@@ -15,6 +15,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: WhisperrAI/whisperr-spec
+          # Contract v2 fixtures. Flip back to main (and SPEC_REF in
+          # test/spec.ts) once whisperr-spec merges feat/contract-v2-sdk.
+          ref: feat/contract-v2-sdk
           path: whisperr-spec
       - uses: actions/setup-node@v4
         with:

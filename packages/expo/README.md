@@ -17,7 +17,7 @@ It builds on [`@whisperr/react-native`](../../README.md) and
 ## Install
 
 ```bash
-npx expo install @whisperr/expo @whisperr/react-native expo-notifications expo-constants @react-native-async-storage/async-storage
+npx expo install @whisperr/expo @whisperr/react-native expo-notifications expo-constants expo-application @react-native-async-storage/async-storage
 ```
 
 Add the plugin to the app config:
@@ -67,11 +67,10 @@ See [Expo: push notifications setup](https://docs.expo.dev/push-notifications/pu
 ## Register for push
 
 ```tsx
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Whisperr } from "@whisperr/react-native";
 import { registerForPushNotifications } from "@whisperr/expo";
 
-const whisperr = Whisperr.init({ apiKey: "wpk_…", storage: AsyncStorage });
+const whisperr = Whisperr.init({ apiKey: "wpk_…" }); // uses AsyncStorage when installed
 
 // After login, at the moment you want the OS prompt:
 whisperr.identify(user.id, { traits: { first_name: user.firstName } });
@@ -85,8 +84,10 @@ What it does:
 2. It reads the permission and, if the app may still ask, shows the prompt.
 3. It reports the permission: `whisperr.setPushPermission(status)`.
 4. If notifications are allowed, it gets the Expo push token (the EAS
-   `projectId` comes from the app config) and calls
-   `whisperr.setPushToken({ token, kind: "expo" })`.
+   `projectId` comes from the app config) and calls `whisperr.setPushToken()`
+   with `kind: "expo"`, the EAS project id as `provider_project`, and the app
+   id (`expo-application`) as `client_app_id`. The server uses the two ids to
+   catch a token of the wrong project or app before a send.
 5. It keeps watching: each time the app comes to the foreground it re-checks
    the permission, and it fetches a new Expo token when the device token
    rotates. `stopPushNotificationUpdates()` stops this.
@@ -102,10 +103,35 @@ It never throws. When there is no token, `reason` says why:
 | `token_unavailable` | The OS gave no token, often on a simulator or emulator. See `error`. |
 | `not_initialized` | `Whisperr.init()` did not run and you passed no `client`. |
 
-Options: `client`, `projectId`, `requestPermission` (default `true`), `ios`
-(prompt options; set `allowProvisional: true` for quiet delivery without a
-prompt), `androidChannel` (`{ id, name, importance }` or `false`), `watch`
-(default `true`), `debug`.
+Options: `client`, `projectId`, `tokenType` (`"expo"` default, or
+`"device"`), `providerProject`, `requestPermission` (default `true`),
+`provisional` (quiet iOS delivery without a prompt), `ios` (prompt options),
+`androidChannel` (`{ id, name, importance }` or `false`), `watch` (default
+`true`), `debug`.
+
+### Device tokens (your own APNs key or Firebase project)
+
+```ts
+await registerForPushNotifications({ tokenType: "device", providerProject: "my-firebase-project" });
+```
+
+With `tokenType: "device"`, the SDK sends the native token instead of the Expo
+token: an APNs token on iOS with its `push_env` (`sandbox` for a
+development-signed build, else `production`, read with
+`expo-application`), an FCM token on Android. Pass `providerProject` with
+your Firebase project id. `toWhisperrPushToken(await
+Notifications.getDevicePushTokenAsync())` does the same mapping when you get
+the token yourself.
+
+### Ask without registering
+
+```ts
+import { requestPushAuthorization } from "@whisperr/expo";
+const status = await requestPushAuthorization({ provisional: true });
+```
+
+It shows the prompt (or, with `provisional`, asks iOS for quiet delivery
+without a prompt) and reports the answer to Whisperr.
 
 ### What Whisperr does with the permission
 
@@ -140,15 +166,25 @@ export default function RootLayout() {
 - It reads `whisperr_message_id` and the deep link (`whisperr_deep_link`, or
   `deep_link`) from the notification data.
 - It sends `push_opened` once per message, also across restarts.
+- `push_opened` carries `action_id` (`default`, or the action button id) and
+  `cold_start` (true for the tap that launched the app).
 - It handles the tap that launched the app (cold start) and taps while the
-  app runs. A remount does not route the same tap twice.
+  app runs. A remount does not route the same tap twice. After a Whisperr tap
+  is handled, it clears the last notification response, so the next launch
+  does not route the same tap again. Pass `clearLastResponse: false` if your
+  own code reads `useLastNotificationResponse()`.
+- It also sends `push_received` for Whisperr notifications that arrive while
+  the app is in the foreground (once per message). Pass
+  `trackReceived: false` to turn this off. `trackAppLifecycleEvents: false` on
+  the client also stops it.
 - Taps on notifications from other senders are ignored.
 - `deepLinkToHref(link, scheme?)` turns `myapp://offers/annual` or
   `https://example.com/offers/annual` into `/offers/annual`. With `scheme`, it
   accepts only links with your app's scheme.
 
 Pass `onOpen` to act on each tap directly. Outside React, use
-`subscribeToWhisperrNotificationOpens(onOpen)`, which returns an unsubscribe.
+`subscribeToWhisperrNotificationOpens(onOpen)` and
+`subscribeToWhisperrNotificationReceipts()`; each returns an unsubscribe.
 
 To show notifications while the app is in the foreground, set a handler with
 `Notifications.setNotificationHandler`. See the expo-notifications docs.
@@ -164,5 +200,6 @@ To show notifications while the app is in the foreground, set a handler with
 
 ## Requirements
 
-- Expo SDK 52 or later, with `expo-notifications` and `expo-constants`.
-- `@whisperr/react-native` 0.4.0 or later.
+- Expo SDK 52 or later, with `expo-notifications`, `expo-constants`, and
+  `expo-application`.
+- `@whisperr/react-native` 0.5.0 or later.

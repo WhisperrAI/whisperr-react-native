@@ -1,6 +1,14 @@
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { SPEC_REF } from "../test/spec.js";
 import { WhisperrClient } from "./client.js";
+
+// Detected push token fields are environment-dependent; legacy harnesses run
+// with environment detection off (whisperr-spec push.json, v2.json).
+vi.mock("./push-environment.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./push-environment.js")>()),
+  detectPushEnvironment: () => ({ providerProject: () => undefined }),
+}));
 
 // Device-derived trait defaults (timezone / locale) are environment-dependent,
 // so the spec fixtures never pin them (SPEC.md → Reserved trait keys): run with
@@ -12,7 +20,7 @@ vi.mock("./device.js", async (importOriginal) => ({
 }));
 
 const SPEC_URL =
-  "https://raw.githubusercontent.com/WhisperrAI/whisperr-spec/main/conformance/wire.json";
+  `https://raw.githubusercontent.com/WhisperrAI/whisperr-spec/${SPEC_REF}/conformance/wire.json`;
 const RFC3339_Z = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 // Real fetch captured before we stub the global for request capture.

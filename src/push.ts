@@ -3,7 +3,6 @@
  * kind). The SDK sends only what it knows: a plain token string goes out as
  * is and the server infers its kind.
  */
-import { currentOSInfo } from "./lifecycle.js";
 import type {
   PushEnvironment,
   PushPermissionStatus,
@@ -32,6 +31,8 @@ export interface PushRegistration {
   kind?: PushTokenKind;
   platform?: PushPlatform;
   pushEnv?: PushEnvironment;
+  clientAppId?: string;
+  providerProject?: string;
 }
 
 export function isExpoPushToken(token: string): boolean {
@@ -63,11 +64,12 @@ export function permissionAllowsPush(status: PushPermissionStatus | null): boole
 
 /**
  * Turns any setPushToken() input into a registration, or null for an empty
- * token.
+ * token. Only what the input says; the client adds the detected fields
+ * (platform, app id, provider project) afterwards.
  *
  * - A string: the token only (the server infers the kind).
- * - `{ token, kind?, platform?, pushEnv? }`: an Expo token without a kind gets
- *   `expo`; `platform` defaults to the OS the app runs on.
+ * - `{ token, kind?, platform?, pushEnv?, clientAppId?, providerProject? }`:
+ *   an Expo token without a kind gets `expo`.
  * - An expo-notifications token (`{ type, data }`): `expo` → `expo`,
  *   `ios` → `apns`, `android` → `fcm`.
  */
@@ -82,17 +84,20 @@ export function normalizePushToken(input: PushTokenInput | null | undefined): Pu
     const token = typeof input.token === "string" ? input.token.trim() : "";
     if (!token) return null;
     const kind = asKind(input.kind) ?? (isExpoPushToken(token) ? "expo" : undefined);
-    return withMeta(token, kind, asPlatform(input.platform) ?? devicePlatform(), asEnv(input.pushEnv));
+    return {
+      ...withMeta(token, kind, asPlatform(input.platform), asEnv(input.pushEnv)),
+      ...ids(input.clientAppId, input.providerProject),
+    };
   }
 
   if ("data" in input && typeof input.data === "string") {
     const token = input.data.trim();
     if (!token) return null;
     const type = typeof input.type === "string" ? input.type : "";
-    if (type === "expo") return withMeta(token, "expo", devicePlatform(), undefined);
+    if (type === "expo") return withMeta(token, "expo", undefined, undefined);
     if (type === "ios") return withMeta(token, "apns", "ios", undefined);
     if (type === "android") return withMeta(token, "fcm", "android", undefined);
-    return withMeta(token, isExpoPushToken(token) ? "expo" : undefined, devicePlatform(), undefined);
+    return withMeta(token, isExpoPushToken(token) ? "expo" : undefined, undefined, undefined);
   }
   return null;
 }
@@ -106,13 +111,33 @@ export function pushChannel(reg: PushRegistration, optedIn: boolean): WhisperrCh
     ...(reg.kind ? { kind: reg.kind } : {}),
     ...(reg.platform ? { platform: reg.platform } : {}),
     ...(reg.pushEnv ? { pushEnv: reg.pushEnv } : {}),
+    ...(reg.clientAppId ? { clientAppId: reg.clientAppId } : {}),
+    ...(reg.providerProject ? { providerProject: reg.providerProject } : {}),
   };
 }
 
-/** A stable signature of the metadata, so a token re-sent with new metadata is not deduped away. */
-export function pushMeta(reg: { kind?: string; platform?: string; pushEnv?: string }): string {
-  if (!reg.kind && !reg.platform && !reg.pushEnv) return "";
-  return `${reg.kind ?? ""}|${reg.platform ?? ""}|${reg.pushEnv ?? ""}`;
+type MetaFields = { kind?: string; platform?: string; pushEnv?: string; clientAppId?: string; providerProject?: string };
+
+/**
+ * A stable signature of the metadata, so a token re-sent with new metadata is
+ * not deduped away. The two ids are appended only when set, so a signature
+ * that SDK 0.4.x persisted still matches the same metadata.
+ */
+export function pushMeta(reg: MetaFields): string {
+  const base = [reg.kind, reg.platform, reg.pushEnv];
+  const extra = reg.clientAppId || reg.providerProject ? [reg.clientAppId, reg.providerProject] : [];
+  const parts = [...base, ...extra];
+  if (parts.every((p) => !p)) return "";
+  return parts.map((p) => p ?? "").join("|");
+}
+
+/** Rebuilds a registration from a persisted metadata signature (see pushMeta). */
+export function registrationFromMeta(token: string, meta: string | undefined): PushRegistration {
+  const [kind, platform, pushEnv, clientAppId, providerProject] = (meta ?? "").split("|");
+  return {
+    ...withMeta(token, asKind(kind), asPlatform(platform), asEnv(pushEnv)),
+    ...ids(clientAppId, providerProject),
+  };
 }
 
 /** The push metadata of a channel, in wire form, with unknown values dropped. */
@@ -125,7 +150,24 @@ export function pushWireMeta(channel: WhisperrChannel): Record<string, string> {
   if (kind) out.kind = kind;
   if (platform) out.platform = platform;
   if (env) out.push_env = env;
+  const clientAppId = cleanId(channel.clientAppId);
+  const providerProject = cleanId(channel.providerProject);
+  if (clientAppId) out.client_app_id = clientAppId;
+  if (providerProject) out.provider_project = providerProject;
   return out;
+}
+
+function ids(clientAppId: unknown, providerProject: unknown): Pick<PushRegistration, "clientAppId" | "providerProject"> {
+  const app = cleanId(clientAppId);
+  const project = cleanId(providerProject);
+  return { ...(app ? { clientAppId: app } : {}), ...(project ? { providerProject: project } : {}) };
+}
+
+/** A non-empty id without the `|` the metadata signature uses as separator. */
+function cleanId(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const v = value.trim();
+  return v && !v.includes("|") ? v : undefined;
 }
 
 function withMeta(
@@ -140,10 +182,6 @@ function withMeta(
     ...(platform ? { platform } : {}),
     ...(pushEnv ? { pushEnv } : {}),
   };
-}
-
-function devicePlatform(): PushPlatform | undefined {
-  return asPlatform(currentOSInfo().platform);
 }
 
 function asKind(value: unknown): PushTokenKind | undefined {

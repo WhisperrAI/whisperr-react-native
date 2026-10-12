@@ -4,6 +4,13 @@ import { WhisperrClient } from "./client.js";
 import { MemoryStorage } from "./storage.js";
 import type { WhisperrError, WhisperrOptions } from "./types.js";
 
+// Detected push token fields are environment-dependent; legacy harnesses run
+// with environment detection off (whisperr-spec push.json, v2.json).
+vi.mock("./push-environment.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./push-environment.js")>()),
+  detectPushEnvironment: () => ({ providerProject: () => undefined }),
+}));
+
 // Device-derived trait defaults (timezone / locale) are environment-dependent,
 // so the spec fixtures never pin them (SPEC.md → Reserved trait keys): run with
 // them disabled so every identify body is exactly what the scenario supplied.
@@ -385,26 +392,32 @@ describe("lifecycle", () => {
     expect(ev.external_user_id).toBeUndefined();
   });
 
-  it("reset() clears the persisted last-sent push token so the next login re-sends it", async () => {
+  it("reset() moves the token to a new anonymous handle; the next login takes it, after a restart too", async () => {
     const storage = new MemoryStorage();
     const first = makeClient({ storage });
     first.identify("user_1");
     first.setPushToken("fcm_tok_a");
     await first.flush();
-    first.reset(); // logout — must also clear the persisted (user, token) pair
+    first.reset(); // logout: opt out under user_1, opt in under the new handle
+    await first.flush();
     await first.close();
+    const handle = identifyCalls().at(-1)!.body.anonymous_id;
+    expect(identifyCalls().slice(2).map((c) => c.body)).toEqual([
+      { external_user_id: "user_1", channels: [{ channel: "push", address: "fcm_tok_a", opted_in: false }] },
+      { anonymous_id: handle, channels: [{ channel: "push", address: "fcm_tok_a", opted_in: true }] },
+    ]);
 
     captured = [];
     const second = makeClient({ storage });
-    await second.flush(); // let init settle (nothing persisted to restore)
+    await second.flush(); // let init settle
     second.identify("user_1");
-    second.setPushToken("fcm_tok_a"); // same user+token — must SEND, not dedupe
+    second.setPushToken("fcm_tok_a"); // the token already rode along on identify: a no-op
     await second.flush();
 
     expect(identifyCalls().map((c) => c.body)).toEqual([
-      { external_user_id: "user_1" },
       {
         external_user_id: "user_1",
+        anonymous_id: handle, // promotes the handle that holds the token
         channels: [{ channel: "push", address: "fcm_tok_a", opted_in: true }],
       },
     ]);
