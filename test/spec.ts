@@ -5,13 +5,12 @@
  * to it (CI checks the spec repo out at SPEC_REF). Otherwise the tests fetch
  * them from GitHub at SPEC_REF.
  *
- * SPEC_REF is the contract v2 branch until whisperr-spec merges it; then it
- * flips back to "main" (here and in .github/workflows/ci.yml + publish.yml).
+ * SPEC_REF pins the fixture revision for the remote fallback.
  */
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-export const SPEC_REF = "feat/contract-v2-sdk";
+export const SPEC_REF = "main";
 
 const realFetch = globalThis.fetch.bind(globalThis);
 

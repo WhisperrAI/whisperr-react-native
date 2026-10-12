@@ -4,6 +4,7 @@
  * the version context keys. Harness rules are in the fixture's description.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { __setPlatform } from "../test/react-native.js";
 import { loadFixture } from "../test/spec.js";
 import { SDK_NAME } from "./autocapture.js";
 import { WhisperrClient } from "./client.js";
@@ -68,7 +69,9 @@ const sections = Object.entries(spec.sections).filter(([, s]) => s.appliesTo.inc
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.useRealTimers();
+  vi.restoreAllMocks();
   env.device = null;
+  __setPlatform({ OS: "ios", Version: "17.4", constants: { systemName: "iOS" } });
 });
 
 describe("contract v2 conformance (whisperr-spec v2.json)", () => {
@@ -94,6 +97,10 @@ async function runCase(c: V2Case): Promise<void> {
     }),
   );
   env.device = c.device ? { ...c.device } : null;
+  // The platform reports only what the device block names: no OS version,
+  // and no timezone offset (automatic properties would carry them).
+  __setPlatform({ OS: PLATFORM, Version: "", constants: {} });
+  vi.spyOn(RealDate.prototype, "getTimezoneOffset").mockReturnValue(Number.NaN);
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(new RealDate("2026-10-12T09:00:00.000Z"));
 
@@ -162,21 +169,7 @@ async function runCase(c: V2Case): Promise<void> {
   }
   await w.close();
 
-  compare(c, withoutPermissionEvents(sent));
-}
-
-/**
- * Known gap in the fixture: a `pushPermission` step makes this SDK send
- * push_permission_changed (the app's explicit report always sends it; SPEC.md
- * → push_permission_changed), but the anonymousPush cases list only the
- * identify requests. Those events are dropped before the comparison.
- */
-function withoutPermissionEvents(sent: Array<{ endpoint: string; body: any }>) {
-  return sent.flatMap((r) => {
-    if (r.endpoint !== "/v1/events/batch") return [r];
-    const events = r.body.events.filter((e: any) => e.event_type !== "push_permission_changed");
-    return events.length ? [{ ...r, body: { ...r.body, events } }] : [];
-  });
+  compare(c, sent);
 }
 
 function compare(c: V2Case, sent: Array<{ endpoint: string; body: any }>): void {
@@ -212,41 +205,48 @@ function compare(c: V2Case, sent: Array<{ endpoint: string; body: any }>): void 
     return resolve(expected, actual, where);
   };
 
-  expect(
-    sent.map((r) => r.endpoint),
-    `${c.name}: request endpoints`,
-  ).toEqual(c.expectedRequests.map((r) => r.endpoint));
+  // Per endpoint: the identify bodies in order, and the events in order. The
+  // order between an identify and an event is not compared.
+  const expectedIdentifies = c.expectedRequests.filter((r) => r.endpoint === "/v1/identify").map((r) => r.body!);
+  const expectedEvents = c.expectedRequests.filter((r) => r.endpoint !== "/v1/identify").flatMap((r) => r.events!);
+  const actualIdentifies = sent.filter((r) => r.endpoint === "/v1/identify").map((r) => r.body);
+  const actualEvents = sent.filter((r) => r.endpoint !== "/v1/identify").flatMap((r) => r.body.events as any[]);
+  expect(sent.every((r) => r.endpoint === "/v1/identify" || r.endpoint === "/v1/events/batch"), c.name).toBe(true);
 
-  c.expectedRequests.forEach((exp, i) => {
-    const got = sent[i]!;
-    const where = `request ${i}`;
-    if (exp.endpoint === "/v1/identify") {
-      const actual = { ...got.body };
-      // An SDK may hold a handle for its anonymous event lane.
-      if (actual.external_user_id && !("anonymous_id" in exp.body!)) delete actual.anonymous_id;
-      expect(actual, `${c.name} ${where}`).toEqual(resolveDeep(exp.body, actual, where));
+  expect(actualIdentifies.length, `${c.name}: identify count`).toBe(expectedIdentifies.length);
+  expectedIdentifies.forEach((exp, i) => {
+    const where = `identify ${i}`;
+    const actual = { ...actualIdentifies[i] };
+    // An SDK may hold a handle for its anonymous event lane.
+    if (actual.external_user_id && !("anonymous_id" in exp)) delete actual.anonymous_id;
+    expect(actual, `${c.name} ${where}`).toEqual(resolveDeep(exp, actual, where));
+  });
+
+  expect(actualEvents.length, `${c.name}: event count`).toBe(expectedEvents.length);
+  expectedEvents.forEach((e, j) => {
+    const actual = actualEvents[j];
+    const ew = `event ${j}`;
+    expect(actual.context?.$message_id, `${c.name} ${ew}: $message_id`).toBeTruthy();
+    if (e.event_type === "push_permission_changed") {
+      // Compared as automatic.json does: no identity fields, no context.
+      expect({ event_type: actual.event_type, properties: actual.properties }, `${c.name} ${ew}`).toEqual(
+        resolveDeep({ event_type: e.event_type, properties: e.properties }, actual, ew),
+      );
       return;
     }
-    const events = got.body.events as any[];
-    expect(events.length, `${c.name} ${where}: event count`).toBe(exp.events!.length);
-    exp.events!.forEach((e, j) => {
-      const actual = events[j];
-      const ew = `${where} event ${j}`;
-      expect(actual.context?.$message_id, `${c.name} ${ew}: $message_id`).toBeTruthy();
-      const { context: expectedContext, ...expectedRest } = e;
-      const { occurred_at: _o, context: actualContext, ...actualRest } = actual;
-      expect(actualRest, `${c.name} ${ew}`).toEqual(resolveDeep(expectedRest, actualRest, ew));
-      if (expectedContext) {
-        for (const key of GOVERNED) {
-          if (key in expectedContext) {
-            expect(actualContext?.[key], `${c.name} ${ew}: context.${key}`).toEqual(
-              resolve(expectedContext[key], actualContext?.[key], `${ew}.context.${key}`),
-            );
-          } else {
-            expect(actualContext, `${c.name} ${ew}: context.${key} must be absent`).not.toHaveProperty(key);
-          }
+    const { context: expectedContext, ...expectedRest } = e;
+    const { occurred_at: _o, context: actualContext, ...actualRest } = actual;
+    expect(actualRest, `${c.name} ${ew}`).toEqual(resolveDeep(expectedRest, actualRest, ew));
+    if (expectedContext) {
+      for (const key of GOVERNED) {
+        if (key in expectedContext) {
+          expect(actualContext?.[key], `${c.name} ${ew}: context.${key}`).toEqual(
+            resolve(expectedContext[key], actualContext?.[key], `${ew}.context.${key}`),
+          );
+        } else {
+          expect(actualContext, `${c.name} ${ew}: context.${key} must be absent`).not.toHaveProperty(key);
         }
       }
-    });
+    }
   });
 }
