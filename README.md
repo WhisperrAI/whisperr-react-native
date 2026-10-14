@@ -148,23 +148,26 @@ Contact channels:
 
 ```ts
 whisperr.identify("user_123", {
-  email: "ada@acme.com",     // an email channel; claims no consent and no verification
-  phone: "+15551234567",     // an opted-in SMS channel
+  email: "ada@acme.com",     // stored as pending: unverified, not opted in
+  phone: "+15551234567",     // stored as pending: unverified, not opted in
   pushToken: fcmToken,       // an opted-in push channel
 });
 
-// Full channel control (consent / verification):
+// Record the user's opt-out from the app:
 whisperr.identify("user_123", {
-  channels: [
-    { type: "email", address: "ada@acme.com", optedIn: true, verified: true },
-    { type: "sms", address: "+15551234567", optedIn: false },
-  ],
+  channels: [{ type: "email", address: "ada@acme.com", optedIn: false }],
 });
 ```
 
-The `email` shortcut sends neither `opted_in` nor `verified`: the SDK does not
-claim consent for the user. When you hold marketing consent, say so with an
-explicit channel.
+The app uses the publishable key (`wpk_…`), which anyone can read from the app
+bundle, so it cannot opt an email or SMS address in. The server stores a new
+address from the app as pending: unverified and not opted in. It ignores
+`optedIn: true` and `verified: true` from the app, and it leaves an address it
+already has as it is. `optedIn: false` records an opt-out with any key.
+
+To confirm consent, identify the same user and address from your backend with
+the server key (`wrk_…`) through a server SDK. Whisperr does not email a pending
+address.
 
 `identify()` also sends `traits.timezone` (IANA, via `Intl`) and `traits.locale` (BCP 47, via `Intl` or `I18nManager`) by default when the runtime can provide them — pass your own `traits.timezone` / `traits.locale` to override, and nothing is sent for a value the device can't supply.
 
@@ -457,7 +460,9 @@ useEffect(() => {
   queueing and surfaced through `onError`.
 - `401`/`403` pause delivery and retain the queue (`auth`); `429`/`5xx`/network
   errors retry with backoff, then retain (`retry_exhausted`); other `4xx` drop
-  the offending batch (`dropped`).
+  the offending batch (`dropped`). The first drop for each status code logs a
+  `console.warn` even with `debug` off; later ones go to `onError`, and to the
+  console with `debug` on.
 - A `429` or `503` with `Retry-After` (seconds or HTTP-date) waits that long,
   capped at 60 s, instead of the backoff.
 - The queue flushes when the app goes to the background.

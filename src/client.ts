@@ -124,6 +124,7 @@ export class WhisperrClient implements WhisperrApi {
   private readonly maxBatchSize: number;
   private readonly maxRetries: number;
   private readonly debug: boolean;
+  private readonly warnedDropStatuses = new Set<number>();
   private readonly disabled: boolean;
   private readonly onError?: (error: WhisperrError) => void;
 
@@ -1066,24 +1067,24 @@ export class WhisperrClient implements WhisperrApi {
         outcome = await this.transport.sendBatch(batch);
         count = batch.length;
       }
-      const { result } = outcome;
       // optOut() replaced the queue while this request was in flight.
       if (this.queue.all[0] !== front) continue;
 
-      if (result === "ok") {
+      if (outcome.result === "ok") {
         if (front.kind === "identify" && front.externalUserId) this.recordDelivery(front, front.externalUserId);
         this.queue.removeFront(count);
         retries = 0;
         continue;
       }
-      if (result === "drop") {
+      if (outcome.result === "drop") {
         this.forgetPushMark(ops.slice(0, count)); // registration rejected — let it re-send
         this.queue.removeFront(count);
         retries = 0;
-        this.emit({ type: "dropped", message: `dropped ${count} event(s) — rejected by server` });
+        this.emit({ type: "dropped", message: `dropped ${count} event(s) — rejected by server`, status: outcome.status });
+        this.warnDropped(front.kind === "identify" ? "an identify request" : `${count} event(s)`, outcome.status);
         continue;
       }
-      if (result === "auth") {
+      if (outcome.result === "auth") {
         this.emit({ type: "auth", message: "delivery paused — API key rejected", status: 401 });
         break; // keep queue for a later attempt
       }
@@ -1181,6 +1182,21 @@ export class WhisperrClient implements WhisperrApi {
     this.flushTimer = setInterval(() => void this.flush(), intervalMs);
     // Don't keep a Node-like host process alive (tests, RN debugging in Node).
     (this.flushTimer as unknown as { unref?: () => void }).unref?.();
+  }
+
+  /**
+   * A rejected request is gone for good, so say so even with debug off: once
+   * per status code per client, so a misconfigured app does not flood the
+   * console. With debug on, every drop is logged.
+   */
+  private warnDropped(what: string, status: number): void {
+    const first = !this.warnedDropStatuses.has(status);
+    if (!first && !this.debug) return;
+    this.warnedDropStatuses.add(status);
+    if (typeof console === "undefined") return;
+    const later = this.debug ? "" : " Later rejections with this status are reported through onError, or here with debug on.";
+    // eslint-disable-next-line no-console
+    console.warn(`[whisperr] dropped ${what}: the server rejected the request with ${status}.${later}`);
   }
 
   private emit(error: WhisperrError): void {

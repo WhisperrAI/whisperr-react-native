@@ -1,13 +1,13 @@
 import { pushWireMeta } from "./push.js";
 import type { IdentifyOp, TrackOp } from "./types.js";
 
-export type SendResult = "ok" | "retry" | "auth" | "drop";
-
-export interface SendOutcome {
-  result: SendResult;
-  /** Server-requested wait before the next attempt (a 429/503 `Retry-After`), already capped. */
-  retryAfterMs?: number;
-}
+export type SendOutcome =
+  | { result: "ok" }
+  | { result: "auth" }
+  /** `retryAfterMs`: server-requested wait before the next attempt (a 429/503 `Retry-After`), already capped. */
+  | { result: "retry"; retryAfterMs?: number }
+  /** `status`: the non-retryable 4xx that rejected the request. */
+  | { result: "drop"; status: number };
 
 /** Longest `Retry-After` we honor; a larger value waits this long, then retries. */
 export const MAX_RETRY_AFTER_MS = 60000;
@@ -120,8 +120,7 @@ export class Transport {
         return retryAfterMs === undefined ? { result: "retry" } : { result: "retry", retryAfterMs };
       }
       // Other 4xx — malformed; dropping avoids an infinite retry loop.
-      this.warn(`request to ${path} dropped (${res.status})`);
-      return { result: "drop" };
+      return { result: "drop", status: res.status };
     } catch {
       // Network error / timeout / abort — retry later.
       return { result: "retry" };
