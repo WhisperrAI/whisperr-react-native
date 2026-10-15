@@ -1447,10 +1447,11 @@ function buildChannels(
   if (params.channels && params.channels.length) {
     out.push(...params.channels);
   } else {
-    // Email: no consent and no verification are claimed on the caller's behalf
-    // (opted_in / verified stay off the wire). Pass an explicit channel to set them.
+    // Email and phone: no consent and no verification are claimed on the
+    // caller's behalf (opted_in / verified stay off the wire). Pass an explicit
+    // channel to set them.
     if (params.email) out.push({ type: "email", address: params.email });
-    if (params.phone) out.push({ type: "sms", address: params.phone, optedIn: true });
+    if (params.phone) out.push({ type: "sms", address: params.phone });
     const push = normalizePushToken(params.pushToken);
     if (push) out.push(pushChannel(withDefaults(push), true));
   }

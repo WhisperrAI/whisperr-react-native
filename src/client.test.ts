@@ -250,13 +250,13 @@ describe("validation and limits", () => {
 });
 
 describe("channel shortcuts", () => {
-  it("email shortcut claims neither consent nor verification", async () => {
+  it("email and phone shortcuts claim neither consent nor verification", async () => {
     const w = makeClient();
     w.identify("user_1", { email: "ada@example.com", phone: "+15551234567" });
     await w.flush();
     expect(identifyCalls()[0]!.body.channels).toEqual([
       { channel: "email", address: "ada@example.com" },
-      { channel: "sms", address: "+15551234567", opted_in: true },
+      { channel: "sms", address: "+15551234567" },
     ]);
   });
 

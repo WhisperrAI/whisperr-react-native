@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **The `phone` shortcut no longer sends `opted_in: true`.** It now sends the
+  `sms` channel with no consent claim, like the `email` shortcut, as the spec
+  requires. The server never opted an SMS address in from the publishable key,
+  so delivery does not change. Pass an explicit channel to send `optedIn`.
+- **README:** Expo push is wired with `expo-notifications` directly;
+  `@whisperr/expo` is not on npm yet. Confirming SMS consent from the backend
+  needs `opted_in: true`. Every rejected-request drop reaches `onError`; only
+  the console warning is once per status code.
+
 - **Rejected requests warn without debug.** When the server rejects a request
   with a non-retryable `4xx` (not `401`, `403` or `429`), the SDK drops it, as
   before, and now logs a `console.warn` the first time each status code occurs,
