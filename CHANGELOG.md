@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.1
 
 - **The `phone` shortcut no longer sends `opted_in: true`.** It now sends the
   `sms` channel with no consent claim, like the `email` shortcut, as the spec
