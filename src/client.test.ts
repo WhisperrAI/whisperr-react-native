@@ -442,6 +442,96 @@ describe("lifecycle", () => {
   });
 });
 
+describe("rejected requests warn without debug", () => {
+  function dropWarnings(warn: { mock: { calls: unknown[][] } }): string[] {
+    return warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes("rejected"));
+  }
+
+  it("warns once per status code, and reports every drop through onError", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const w = makeClient();
+      w.identify("user_1");
+      await w.flush();
+
+      status = 400;
+      w.track("first_event");
+      w.track("second_event");
+      await w.flush();
+      w.track("third_event");
+      await w.flush();
+      status = 422;
+      w.track("fourth_event");
+      await w.flush();
+
+      expect(dropWarnings(warn)).toEqual([
+        "[whisperr] dropped 2 event(s): the server rejected the request with 400. Later rejections with this status are reported through onError, or here with debug on.",
+        "[whisperr] dropped 1 event(s): the server rejected the request with 422. Later rejections with this status are reported through onError, or here with debug on.",
+      ]);
+      expect(errors.filter((e) => e.type === "dropped").map((e) => e.status)).toEqual([400, 400, 422]);
+      expect(w.pendingCount).toBe(0);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("names a rejected identify", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      status = 400;
+      const w = makeClient();
+      w.identify("user_1", { traits: { plan: "pro" } });
+      await w.flush();
+      expect(dropWarnings(warn)).toEqual([
+        "[whisperr] dropped an identify request: the server rejected the request with 400. Later rejections with this status are reported through onError, or here with debug on.",
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("warns on every drop with debug on", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const w = makeClient({ debug: true });
+      w.identify("user_1");
+      await w.flush();
+      status = 400;
+      w.track("first_event");
+      await w.flush();
+      w.track("second_event");
+      await w.flush();
+      expect(dropWarnings(warn)).toEqual([
+        "[whisperr] dropped 1 event(s): the server rejected the request with 400.",
+        "[whisperr] dropped 1 event(s): the server rejected the request with 400.",
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it.each([429, 503])("keeps and retries a %i without a drop warning", async (code) => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const w = makeClient();
+      w.identify("user_1");
+      await w.flush();
+      status = code;
+      w.track("feature_used");
+      await w.flush();
+      expect(dropWarnings(warn)).toEqual([]);
+      expect(w.pendingCount).toBe(1);
+      expect(errors.some((e) => e.type === "dropped")).toBe(false);
+
+      status = 200;
+      await w.flush();
+      expect(w.pendingCount).toBe(0);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
 describe("push dedupe marks on delivery, not enqueue", () => {
   it("re-sends a token whose registration was dropped (4xx) instead of wedging it", async () => {
     const w = makeClient();

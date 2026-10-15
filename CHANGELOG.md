@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- **Rejected requests warn without debug.** When the server rejects a request
+  with a non-retryable `4xx` (not `401`, `403` or `429`), the SDK drops it, as
+  before, and now logs a `console.warn` the first time each status code occurs,
+  even with `debug` off. With `debug` on it warns on every drop. The `dropped`
+  error passed to `onError` now carries the HTTP `status`. `429` and `5xx`
+  keep retrying as before.
+- **README: what the `email` shortcut does to consent.** An email or SMS
+  address sent with the publishable key is stored as pending (unverified, not
+  opted in), and Whisperr does not email it until your backend confirms the
+  address with the server key. The README no longer shows `optedIn: true` /
+  `verified: true` from the app, which the server ignores.
+
 ## 0.5.0
 
 Contract v2 (whisperr-spec `v2.json`). **Release this version only after the
