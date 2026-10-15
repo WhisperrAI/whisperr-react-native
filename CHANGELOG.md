@@ -11,8 +11,6 @@
   needs `opted_in: true`. Every rejected-request drop reaches `onError`; only
   the console warning is once per status code.
 
-## Unreleased
-
 - **Rejected requests warn without debug.** When the server rejects a request
   with a non-retryable `4xx` (not `401`, `403` or `429`), the SDK drops it, as
   before, and now logs a `console.warn` the first time each status code occurs,
