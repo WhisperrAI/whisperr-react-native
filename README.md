@@ -38,8 +38,7 @@ whisperr.reset();
   stop all capture, automatic events included. `optOut()` also opts this
   device's push token out on the server.
 - **Push-ready** — token kinds (Expo, FCM, APNs), permission state, and
-  notification-open tracking with deep links. Expo apps get it in one call with
-  [`@whisperr/expo`](packages/expo/README.md).
+  notification-open tracking with deep links.
 
 ## Storage (durability)
 
@@ -166,8 +165,9 @@ address from the app as pending: unverified and not opted in. It ignores
 already has as it is. `optedIn: false` records an opt-out with any key.
 
 To confirm consent, identify the same user and address from your backend with
-the server key (`wrk_…`) through a server SDK. Whisperr does not email a pending
-address.
+the server key (`wrk_…`) through a server SDK. For email, the address alone is
+enough. For SMS, also send `opted_in: true`: an SMS address without it is never
+opted in. Whisperr does not email a pending address.
 
 `identify()` also sends `traits.timezone` (IANA, via `Intl`) and `traits.locale` (BCP 47, via `Intl` or `I18nManager`) by default when the runtime can provide them — pass your own `traits.timezone` / `traits.locale` to override, and nothing is sent for a value the device can't supply.
 
@@ -203,11 +203,6 @@ whisperr.setAppLanguage(null);    // clear the stored value
 - The same value again sends nothing. An invalid tag is ignored.
 
 ## Push notifications
-
-**Expo app?** Use [`@whisperr/expo`](packages/expo/README.md). It sets up
-native push, asks for permission, registers the Expo push token, and tracks
-notification taps with deep links. The rest of this section is for bare React
-Native, or for apps that wire push by hand.
 
 The SDK never bundles a push library. Hand it the token your messaging setup
 produces, and Whisperr keeps the `push` channel current:
@@ -313,6 +308,28 @@ requests like any other, also after a restart. An app that opted out with SDK
 SMS, and the user's other devices keep their state, and data already sent is
 not deleted. After `optIn()`, call `setPushToken()` again to register the
 token.
+
+### Expo with `expo-notifications`
+
+Register the Expo push token and report the permission. Connect the Expo
+provider in Whisperr.
+
+```tsx
+import Constants from "expo-constants";
+import * as Notifications from "expo-notifications";
+
+async function registerPush() {
+  const status = await whisperr.requestPushAuthorization();
+  if (status !== "granted" && status !== "provisional") return;
+  const projectId = Constants.expoConfig?.extra?.eas?.projectId;
+  whisperr.setPushToken(await Notifications.getExpoPushTokenAsync({ projectId }));
+}
+```
+
+To report taps, see [Push opens](#push-opens).
+
+A package that does this wiring in one call, `@whisperr/expo`, is coming. It is
+not on npm yet.
 
 ### Bare React Native with `@react-native-firebase/messaging`
 
@@ -436,7 +453,7 @@ Notifications.events().registerNotificationOpened((n, completion) => {
 });
 ```
 
-With `expo-notifications` by hand (without `@whisperr/expo`):
+With `expo-notifications`:
 
 ```tsx
 import * as Notifications from "expo-notifications";
@@ -460,9 +477,9 @@ useEffect(() => {
   queueing and surfaced through `onError`.
 - `401`/`403` pause delivery and retain the queue (`auth`); `429`/`5xx`/network
   errors retry with backoff, then retain (`retry_exhausted`); other `4xx` drop
-  the offending batch (`dropped`). The first drop for each status code logs a
-  `console.warn` even with `debug` off; later ones go to `onError`, and to the
-  console with `debug` on.
+  the offending batch (`dropped`). Every drop reaches `onError`. The first drop
+  for each status code also logs a `console.warn`, even with `debug` off; with
+  `debug` on, every drop logs one.
 - A `429` or `503` with `Retry-After` (seconds or HTTP-date) waits that long,
   capped at 60 s, instead of the backoff.
 - The queue flushes when the app goes to the background.

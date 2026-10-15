@@ -148,7 +148,7 @@ export interface IdentifyParams {
    * an explicit channel (`channels`) when you hold that consent.
    */
   email?: string;
-  /** Convenience: expands to an opted-in SMS channel. */
+  /** Convenience: expands to an SMS channel. Claims no consent and no verification. */
   phone?: string;
   /**
    * Convenience: expands to an opted-in push channel. Accepts the same forms as
