@@ -143,11 +143,28 @@ export interface IdentifyParams {
    */
   traits?: Record<string, unknown>;
   /**
-   * Convenience: expands to an email channel. The SDK asserts no consent and no
-   * verification for it — `opted_in` and `verified` are left off the wire. Pass
-   * an explicit channel (`channels`) when you hold that consent.
+   * Convenience: expands to an email channel. `verified` is never sent.
+   * `opted_in` is sent only when you pass `emailOptedIn`.
+   *
+   * Whether Whisperr may email an address that the app sends depends on the
+   * app's answer in Whisperr to "Does your signup get permission to email
+   * users?":
+   * - Yes: the address is opted in unless you pass `emailOptedIn: false`.
+   * - Per user: the address is opted in only when you pass `emailOptedIn: true`.
+   * - No, or not answered: the address stays pending until your backend
+   *   confirms it with the server key.
+   *
+   * With "Require a server key" on (the stricter mode), only your backend can
+   * opt an address in, whatever the app sends. An opt-out (`false`) counts
+   * with any key.
    */
   email?: string;
+  /**
+   * The user's email consent, sent as `opted_in` on the `email` shortcut's
+   * channel. Leave it out to send no consent claim. Ignored without `email`
+   * or when `channels` is given. See `email` for how Whisperr uses it.
+   */
+  emailOptedIn?: boolean;
   /** Convenience: expands to an SMS channel. Claims no consent and no verification. */
   phone?: string;
   /**

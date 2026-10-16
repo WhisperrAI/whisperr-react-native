@@ -1,6 +1,6 @@
 {
   "name": "@whisperr/expo",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Push notifications for Expo apps on Whisperr: config plugin, permission + push token registration, notification opens with deep links, and foreground receipts.",
   "license": "MIT",
   "main": "./dist/index.js",

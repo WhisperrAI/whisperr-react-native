@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.6.0
+
+- **`identify(userId, { email, emailOptedIn })`.** The new `emailOptedIn`
+  option sends the user's email consent as `opted_in` on the `email`
+  shortcut's channel. Left out, the SDK sends no consent claim, as before. It
+  never claims `verified`. A non-boolean value is not sent.
+- **What the app's email consent does** now depends on the app's answer in
+  Whisperr to "Does your signup get permission to email users?": Yes opts the
+  address in unless `emailOptedIn: false`; Per user opts it in only with
+  `emailOptedIn: true`; No (or no answer) keeps it pending until your backend
+  confirms it with the server key. "Require a server key" stays the stricter
+  mode. This needs the Whisperr backend with client email consent. An older
+  backend ignores `opted_in: true` from the app key, so the address stays
+  pending, as in 0.5.1.
+- **README:** the identify section explains the consent answers and the
+  limits on the app key. It links `@whisperr/expo`, which is on npm.
+
 ## 0.5.1
 
 - **The `phone` shortcut no longer sends `opted_in: true`.** It now sends the

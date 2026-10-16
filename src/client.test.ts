@@ -260,6 +260,37 @@ describe("channel shortcuts", () => {
     ]);
   });
 
+  it("emailOptedIn sends the user's email consent as opted_in, never verified", async () => {
+    const w = makeClient();
+    w.identify("user_1", { email: "ada@example.com", emailOptedIn: true });
+    w.identify("user_2", { email: "bob@example.com", emailOptedIn: false });
+    await w.flush();
+    const [granted, declined] = identifyCalls();
+    expect(granted!.body.channels).toEqual([{ channel: "email", address: "ada@example.com", opted_in: true }]);
+    expect(declined!.body.channels).toEqual([{ channel: "email", address: "bob@example.com", opted_in: false }]);
+  });
+
+  it("emailOptedIn without an email, or with explicit channels, sends no email claim", async () => {
+    const w = makeClient();
+    w.identify("user_1", { traits: { plan: "pro" }, emailOptedIn: true });
+    w.identify("user_1", {
+      email: "ada@example.com",
+      emailOptedIn: true,
+      channels: [{ type: "email", address: "work@example.com" }],
+    });
+    await w.flush();
+    const [noEmail, explicit] = identifyCalls();
+    expect(noEmail!.body.channels).toBeUndefined();
+    expect(explicit!.body.channels).toEqual([{ channel: "email", address: "work@example.com" }]);
+  });
+
+  it("a non-boolean emailOptedIn from plain JavaScript is not sent", async () => {
+    const w = makeClient();
+    w.identify("user_1", { email: "ada@example.com", emailOptedIn: "yes" as unknown as boolean });
+    await w.flush();
+    expect(identifyCalls()[0]!.body.channels).toEqual([{ channel: "email", address: "ada@example.com" }]);
+  });
+
   it("explicit channels keep the caller's consent and verification", async () => {
     const w = makeClient();
     w.identify("user_1", {
