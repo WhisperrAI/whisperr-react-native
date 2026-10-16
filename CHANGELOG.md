@@ -2,18 +2,24 @@
 
 ## 0.6.0
 
+**Release this version only after the Whisperr backend with client email
+consent (`consent_source`) is live.** An older server rejects the unknown
+`consent_source` field with `400`, and the SDK drops that identify.
+
 - **`identify(userId, { email, emailOptedIn })`.** The new `emailOptedIn`
-  option sends the user's email consent as `opted_in` on the `email`
-  shortcut's channel. Left out, the SDK sends no consent claim, as before. It
-  never claims `verified`. A non-boolean value is not sent.
+  option sends the user's email consent on the `email` shortcut's channel.
+  `true` sends `opted_in: true` with `consent_source: "user"`; `false` sends
+  `opted_in: false` only. Left out, the SDK sends neither, as before. It never
+  claims `verified`. A non-boolean value is not sent.
+- **Explicit email channels:** an email channel with `optedIn: true` now also
+  sends `consent_source: "user"`. Other channels, and push, are unchanged.
 - **What the app's email consent does** now depends on the app's answer in
   Whisperr to "Does your signup get permission to email users?": Yes opts the
   address in unless `emailOptedIn: false`; Per user opts it in only with
   `emailOptedIn: true`; No (or no answer) keeps it pending until your backend
   confirms it with the server key. "Require a server key" stays the stricter
-  mode. This needs the Whisperr backend with client email consent. An older
-  backend ignores `opted_in: true` from the app key, so the address stays
-  pending, as in 0.5.1.
+  mode. An earlier opt-out (from the app, the unsubscribe link, or a bounce or
+  complaint) is kept.
 - **README:** the identify section explains the consent answers and the
   limits on the app key. It links `@whisperr/expo`, which is on npm.
 

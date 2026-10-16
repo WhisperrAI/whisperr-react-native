@@ -64,6 +64,9 @@ export function identifyBody(op: IdentifyOp): Record<string, unknown> {
       // (or a shortcut that implies them, like an OS-granted push token) set them.
       ...(c.optedIn !== undefined ? { opted_in: c.optedIn } : {}),
       ...(c.verified !== undefined ? { verified: c.verified } : {}),
+      // An email opt-in set by the app is the end user's consent: mark it so the
+      // server can tell it from older SDKs' default `opted_in: true`.
+      ...(c.type === "email" && c.optedIn === true ? { consent_source: "user" } : {}),
       // Push token metadata (kind / platform / push_env / client_app_id /
       // provider_project): only the known values,
       // and only on an opted-in entry. An opt-out is matched by address alone.

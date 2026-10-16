@@ -157,8 +157,10 @@ whisperr.identify("user_123", {
 whisperr.identify("user_123", { email: "ada@acme.com", emailOptedIn: false });
 ```
 
-`emailOptedIn` is sent as `opted_in` on the email channel. Without it, the SDK
-sends no consent claim. The SDK never claims `verified`.
+`emailOptedIn: true` sends `opted_in: true` and `consent_source: "user"` on
+the email channel. `false` sends `opted_in: false`. Without it, the SDK sends
+no consent claim. An explicit email channel with `optedIn: true` also sends
+`consent_source: "user"`. The SDK never claims `verified`.
 
 The app uses the publishable key (`wpk_…`), which anyone can read from the app
 bundle. So whether Whisperr may email an address that the app sends depends on

@@ -5,7 +5,10 @@ export interface WhisperrChannel {
   type: string;
   /** The address/token for the channel (email address, phone, push token). */
   address: string;
-  /** Whether the user has opted in to this channel. */
+  /**
+   * Whether the user has opted in to this channel. On an email channel, `true`
+   * also sends `consent_source: "user"` (the end user's own consent).
+   */
   optedIn?: boolean;
   /** Whether the address is verified. */
   verified?: boolean;
@@ -160,9 +163,10 @@ export interface IdentifyParams {
    */
   email?: string;
   /**
-   * The user's email consent, sent as `opted_in` on the `email` shortcut's
-   * channel. Leave it out to send no consent claim. Ignored without `email`
-   * or when `channels` is given. See `email` for how Whisperr uses it.
+   * The user's email consent on the `email` shortcut's channel. `true` sends
+   * `opted_in: true` with `consent_source: "user"`; `false` sends
+   * `opted_in: false`. Leave it out to send no consent claim. Ignored without
+   * `email` or when `channels` is given. See `email` for how Whisperr uses it.
    */
   emailOptedIn?: boolean;
   /** Convenience: expands to an SMS channel. Claims no consent and no verification. */

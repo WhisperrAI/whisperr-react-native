@@ -260,14 +260,20 @@ describe("channel shortcuts", () => {
     ]);
   });
 
-  it("emailOptedIn sends the user's email consent as opted_in, never verified", async () => {
+  it("emailOptedIn: true sends opted_in with the user consent marker, never verified", async () => {
     const w = makeClient();
     w.identify("user_1", { email: "ada@example.com", emailOptedIn: true });
-    w.identify("user_2", { email: "bob@example.com", emailOptedIn: false });
     await w.flush();
-    const [granted, declined] = identifyCalls();
-    expect(granted!.body.channels).toEqual([{ channel: "email", address: "ada@example.com", opted_in: true }]);
-    expect(declined!.body.channels).toEqual([{ channel: "email", address: "bob@example.com", opted_in: false }]);
+    expect(identifyCalls()[0]!.body.channels).toEqual([
+      { channel: "email", address: "ada@example.com", opted_in: true, consent_source: "user" },
+    ]);
+  });
+
+  it("emailOptedIn: false sends only opted_in: false", async () => {
+    const w = makeClient();
+    w.identify("user_1", { email: "ada@example.com", emailOptedIn: false });
+    await w.flush();
+    expect(identifyCalls()[0]!.body.channels).toEqual([{ channel: "email", address: "ada@example.com", opted_in: false }]);
   });
 
   it("emailOptedIn without an email, or with explicit channels, sends no email claim", async () => {
@@ -298,8 +304,23 @@ describe("channel shortcuts", () => {
     });
     await w.flush();
     expect(identifyCalls()[0]!.body.channels).toEqual([
-      { channel: "email", address: "ada@example.com", opted_in: true, verified: true },
+      { channel: "email", address: "ada@example.com", opted_in: true, verified: true, consent_source: "user" },
     ]);
+  });
+
+  it("the consent marker goes only on an opted-in email channel", async () => {
+    const w = makeClient();
+    w.identify("user_1", {
+      channels: [
+        { type: "email", address: "ada@example.com", optedIn: false },
+        { type: "sms", address: "+15551234567", optedIn: true },
+        { type: "push", address: "fcm_tok_a", optedIn: true },
+      ],
+    });
+    await w.flush();
+    const channels = identifyCalls()[0]!.body.channels as Record<string, unknown>[];
+    expect(channels.map((c) => c.consent_source)).toEqual([undefined, undefined, undefined]);
+    expect(channels[0]).toEqual({ channel: "email", address: "ada@example.com", opted_in: false });
   });
 });
 
