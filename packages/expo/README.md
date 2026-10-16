@@ -100,6 +100,11 @@ users?":
 | Per user | Is opted in only when you pass `emailOptedIn: true`. |
 | No, or not answered | Stays pending (not opted in) until your backend confirms it with the server key. |
 
+"Opted in" in this table has two exceptions. Both leave the address pending:
+
+- Another user of the app already holds the address opted in.
+- The app reached the hourly limit on new opted-in addresses from the app.
+
 An earlier opt-out is kept. That covers `emailOptedIn: false`, the user's
 click on the unsubscribe link, and suppression after a bounce or a complaint.
 A later identify from the app never opts that address back in.
