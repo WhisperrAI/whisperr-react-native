@@ -5,7 +5,10 @@ export interface WhisperrChannel {
   type: string;
   /** The address/token for the channel (email address, phone, push token). */
   address: string;
-  /** Whether the user has opted in to this channel. */
+  /**
+   * Whether the user has opted in to this channel. On an email channel, `true`
+   * also sends `consent_source: "user"` (the end user's own consent).
+   */
   optedIn?: boolean;
   /** Whether the address is verified. */
   verified?: boolean;
@@ -143,11 +146,29 @@ export interface IdentifyParams {
    */
   traits?: Record<string, unknown>;
   /**
-   * Convenience: expands to an email channel. The SDK asserts no consent and no
-   * verification for it — `opted_in` and `verified` are left off the wire. Pass
-   * an explicit channel (`channels`) when you hold that consent.
+   * Convenience: expands to an email channel. `verified` is never sent.
+   * `opted_in` is sent only when you pass `emailOptedIn`.
+   *
+   * Whether Whisperr may email an address that the app sends depends on the
+   * app's answer in Whisperr to "Does your signup get permission to email
+   * users?":
+   * - Yes: the address is opted in unless you pass `emailOptedIn: false`.
+   * - Per user: the address is opted in only when you pass `emailOptedIn: true`.
+   * - No, or not answered: the address stays pending until your backend
+   *   confirms it with the server key.
+   *
+   * With "Require a server key" on (the stricter mode), only your backend can
+   * opt an address in, whatever the app sends. An opt-out (`false`) counts
+   * with any key.
    */
   email?: string;
+  /**
+   * The user's email consent on the `email` shortcut's channel. `true` sends
+   * `opted_in: true` with `consent_source: "user"`; `false` sends
+   * `opted_in: false`. Leave it out to send no consent claim. Ignored without
+   * `email` or when `channels` is given. See `email` for how Whisperr uses it.
+   */
+  emailOptedIn?: boolean;
   /** Convenience: expands to an SMS channel. Claims no consent and no verification. */
   phone?: string;
   /**

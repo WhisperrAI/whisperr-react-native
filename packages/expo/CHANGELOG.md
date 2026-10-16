@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.1
+
+- **README:** the link to `@whisperr/react-native` pointed at
+  `../../README.md`, which is broken on npm. It now goes to the GitHub README
+  and the docs. A new "Users and events" section shows `identify()` with
+  `email` and `emailOptedIn` (`@whisperr/react-native` 0.6.0 or later), and
+  `track()`. No code changes.
+
 ## 0.1.0
 
 First release. Needs `@whisperr/react-native` 0.5.0 or later (a peer

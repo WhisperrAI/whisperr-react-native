@@ -147,27 +147,53 @@ Contact channels:
 
 ```ts
 whisperr.identify("user_123", {
-  email: "ada@acme.com",     // stored as pending: unverified, not opted in
+  email: "ada@acme.com",
+  emailOptedIn: true,        // the user agreed to email at signup; leave out if you don't know
   phone: "+15551234567",     // stored as pending: unverified, not opted in
   pushToken: fcmToken,       // an opted-in push channel
 });
 
 // Record the user's opt-out from the app:
-whisperr.identify("user_123", {
-  channels: [{ type: "email", address: "ada@acme.com", optedIn: false }],
-});
+whisperr.identify("user_123", { email: "ada@acme.com", emailOptedIn: false });
 ```
 
-The app uses the publishable key (`wpk_…`), which anyone can read from the app
-bundle, so it cannot opt an email or SMS address in. The server stores a new
-address from the app as pending: unverified and not opted in. It ignores
-`optedIn: true` and `verified: true` from the app, and it leaves an address it
-already has as it is. `optedIn: false` records an opt-out with any key.
+`emailOptedIn: true` sends `opted_in: true` and `consent_source: "user"` on
+the email channel. `false` sends `opted_in: false`. Without it, the SDK sends
+no consent claim. An explicit email channel with `optedIn: true` also sends
+`consent_source: "user"`. The SDK never claims `verified`.
 
-To confirm consent, identify the same user and address from your backend with
-the server key (`wrk_…`) through a server SDK. For email, the address alone is
-enough. For SMS, also send `opted_in: true`: an SMS address without it is never
-opted in. Whisperr does not email a pending address.
+The app uses the publishable key (`wpk_…`), which anyone can read from the app
+bundle. So whether Whisperr may email an address that the app sends depends on
+your answer in Whisperr to "Does your signup get permission to email users?":
+
+| Answer | An email address the app sends |
+|---|---|
+| Yes | Is opted in, unless you pass `emailOptedIn: false`. |
+| Per user | Is opted in only when you pass `emailOptedIn: true`. |
+| No, or not answered | Stays pending (not opted in) until your backend confirms it. |
+
+"Opted in" in this table has two exceptions. Both leave the address pending:
+
+- Another user of the app already holds the address opted in.
+- The app reached the hourly limit on new opted-in addresses from the app.
+
+An earlier opt-out is kept. That covers `emailOptedIn: false`, the user's
+click on the unsubscribe link, and suppression after a bounce or a complaint.
+A later identify from the app never opts that address back in.
+
+Limits on what the app can do with the publishable key:
+
+- It cannot give a user a different email address from the one the user
+  already has. The server rejects that identify with `403
+  contact_change_requires_server_key`. Your backend can change it.
+- `emailOptedIn: false` records an opt-out with any key.
+
+The stricter mode is the "Require a server key" setting. With it on, only your
+backend can opt an address in, whatever the app sends. To confirm consent from
+your backend, identify the same user and address with the server key (`wrk_…`)
+through a server SDK. For SMS, also send `opted_in: true`: the app cannot opt
+an SMS address in, and an SMS address without it is never opted in. Whisperr
+does not email a pending address.
 
 `identify()` also sends `traits.timezone` (IANA, via `Intl`) and `traits.locale` (BCP 47, via `Intl` or `I18nManager`) by default when the runtime can provide them — pass your own `traits.timezone` / `traits.locale` to override, and nothing is sent for a value the device can't supply.
 
@@ -328,8 +354,9 @@ async function registerPush() {
 
 To report taps, see [Push opens](#push-opens).
 
-A package that does this wiring in one call, `@whisperr/expo`, is coming. It is
-not on npm yet.
+[`@whisperr/expo`](https://github.com/WhisperrAI/whisperr-react-native/tree/main/packages/expo#readme)
+does this wiring in one call, adds a config plugin for native push setup, and
+reports notification taps with their deep links.
 
 ### Bare React Native with `@react-native-firebase/messaging`
 

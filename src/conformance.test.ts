@@ -84,6 +84,7 @@ describe("wire conformance (whisperr-spec)", () => {
         w.identify(s.externalUserId, {
           traits: s.traits,
           email: s.email,
+          emailOptedIn: s.emailOptedIn,
           phone: s.phone,
           pushToken: s.pushToken,
           preferredChannel: s.preferredChannel,
@@ -114,7 +115,7 @@ describe("wire conformance (whisperr-spec)", () => {
           expect(ev.occurred_at, `${c.name}.occurred_at`).toBe(c.expectedOccurredAt);
         }
       } else {
-        for (const [k, v] of Object.entries(withKnownDivergences(c.name, c.expectedBody ?? {}))) {
+        for (const [k, v] of Object.entries(withKnownDivergences(c, c.expectedBody ?? {}))) {
           expect(call!.body[k], `${c.name}.${k}`).toEqual(v);
         }
       }
@@ -126,12 +127,14 @@ describe("wire conformance (whisperr-spec)", () => {
  * Deliberate, documented departures from the spec fixture while the spec
  * catches up (plan of record, Workstream 4 step 4: no automatic opt-in).
  *
- * - The `email` shortcut asserts no consent: the SDK leaves `opted_in` off
- *   the email channel instead of claiming `true` for the user. Idempotent, so
- *   this stays correct once the fixture drops `opted_in` itself.
+ * - The `email` shortcut without `emailOptedIn` asserts no consent: the SDK
+ *   leaves `opted_in` off the email channel instead of claiming `true` for the
+ *   user. Idempotent, so this stays correct once the fixture drops `opted_in`
+ *   itself. A scenario that passes `emailOptedIn` is compared as written.
  */
-function withKnownDivergences(name: string, expected: Record<string, unknown>): Record<string, unknown> {
-  if (name !== "identify_email_shortcut" || !Array.isArray(expected.channels)) return expected;
+function withKnownDivergences(c: WireCase, expected: Record<string, unknown>): Record<string, unknown> {
+  if (c.name !== "identify_email_shortcut" || c.scenario.emailOptedIn !== undefined) return expected;
+  if (!Array.isArray(expected.channels)) return expected;
   return {
     ...expected,
     channels: (expected.channels as Record<string, unknown>[]).map((ch) => {

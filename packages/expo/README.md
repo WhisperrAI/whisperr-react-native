@@ -11,7 +11,9 @@ Push notifications for Expo apps on Whisperr. Three parts:
    user taps a Whisperr notification, and gives you the deep link for your
    router. The cold start is included.
 
-It builds on [`@whisperr/react-native`](../../README.md) and
+It builds on [`@whisperr/react-native`](https://github.com/WhisperrAI/whisperr-react-native#readme)
+([docs](https://docs.whisperr.net/sdks/react-native/)), which sends your users
+and events, and on
 [`expo-notifications`](https://docs.expo.dev/versions/latest/sdk/notifications/).
 
 ## Install
@@ -64,16 +66,60 @@ Whisperr sends Expo tokens through Expo's push service. Expo needs:
 
 See [Expo: push notifications setup](https://docs.expo.dev/push-notifications/push-notifications-setup/).
 
-## Register for push
+## Users and events
+
+Users and events go through `@whisperr/react-native`. Init it once with the
+app key (`wpk_…`), identify the user after login, and track what they do:
 
 ```tsx
 import { Whisperr } from "@whisperr/react-native";
-import { registerForPushNotifications } from "@whisperr/expo";
 
 const whisperr = Whisperr.init({ apiKey: "wpk_…" }); // uses AsyncStorage when installed
 
-// After login, at the moment you want the OS prompt:
-whisperr.identify(user.id, { traits: { first_name: user.firstName } });
+// After login and on session restore:
+whisperr.identify(user.id, {
+  traits: { first_name: user.firstName },
+  email: user.email,
+  emailOptedIn: user.agreedToEmail, // true, false, or leave it out
+});
+
+// When something happens:
+whisperr.track("lesson_completed", { lesson_id: "intro" });
+
+// On logout:
+whisperr.reset();
+```
+
+`emailOptedIn` is the user's email consent. What Whisperr does with it depends
+on your answer in Whisperr to "Does your signup get permission to email
+users?":
+
+| Answer | An email address the app sends |
+|---|---|
+| Yes | Is opted in, unless you pass `emailOptedIn: false`. |
+| Per user | Is opted in only when you pass `emailOptedIn: true`. |
+| No, or not answered | Stays pending (not opted in) until your backend confirms it with the server key. |
+
+"Opted in" in this table has two exceptions. Both leave the address pending:
+
+- Another user of the app already holds the address opted in.
+- The app reached the hourly limit on new opted-in addresses from the app.
+
+An earlier opt-out is kept. That covers `emailOptedIn: false`, the user's
+click on the unsubscribe link, and suppression after a bounce or a complaint.
+A later identify from the app never opts that address back in.
+
+With "Require a server key" on, only your backend can opt an address in. The
+app key cannot give a user a different email address from the one they
+already have. The [`@whisperr/react-native` README](https://github.com/WhisperrAI/whisperr-react-native#identify)
+has the details. `emailOptedIn` needs `@whisperr/react-native` 0.6.0 or later.
+
+## Register for push
+
+```tsx
+import { registerForPushNotifications } from "@whisperr/expo";
+
+// After Whisperr.init() and identify(), at the moment you want the OS prompt:
 const { status, token, reason } = await registerForPushNotifications();
 ```
 
@@ -202,4 +248,4 @@ To show notifications while the app is in the foreground, set a handler with
 
 - Expo SDK 52 or later, with `expo-notifications`, `expo-constants`, and
   `expo-application`.
-- `@whisperr/react-native` 0.5.0 or later.
+- `@whisperr/react-native` 0.5.0 or later (0.6.0 or later for `emailOptedIn`).
