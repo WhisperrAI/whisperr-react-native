@@ -100,6 +100,10 @@ users?":
 | Per user | Is opted in only when you pass `emailOptedIn: true`. |
 | No, or not answered | Stays pending (not opted in) until your backend confirms it with the server key. |
 
+An earlier opt-out is kept. That covers `emailOptedIn: false`, the user's
+click on the unsubscribe link, and suppression after a bounce or a complaint.
+A later identify from the app never opts that address back in.
+
 With "Require a server key" on, only your backend can opt an address in. The
 app key cannot give a user a different email address from the one they
 already have. The [`@whisperr/react-native` README](https://github.com/WhisperrAI/whisperr-react-native#identify)

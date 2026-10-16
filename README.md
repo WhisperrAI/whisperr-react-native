@@ -170,6 +170,10 @@ your answer in Whisperr to "Does your signup get permission to email users?":
 | Per user | Is opted in only when you pass `emailOptedIn: true`. |
 | No, or not answered | Stays pending (not opted in) until your backend confirms it. |
 
+An earlier opt-out is kept. That covers `emailOptedIn: false`, the user's
+click on the unsubscribe link, and suppression after a bounce or a complaint.
+A later identify from the app never opts that address back in.
+
 Limits on what the app can do with the publishable key:
 
 - It cannot give a user a different email address from the one the user
