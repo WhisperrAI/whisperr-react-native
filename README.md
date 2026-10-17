@@ -16,8 +16,8 @@ const whisperr = Whisperr.init({ apiKey: "wpk_…" });
 // after the user logs in / on session restore
 whisperr.identify("user_123", { traits: { first_name: "Ada", plan: "pro" } });
 
-// when something happens
-whisperr.track("subscription_cancelled", { reason: "too_expensive" });
+// when the user does your app's core action (this event name is only an example)
+whisperr.track("report_exported", { format: "pdf" });
 
 // on logout
 whisperr.reset();
