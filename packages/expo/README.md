@@ -83,8 +83,8 @@ whisperr.identify(user.id, {
   emailOptedIn: user.agreedToEmail, // true, false, or leave it out
 });
 
-// When something happens:
-whisperr.track("lesson_completed", { lesson_id: "intro" });
+// When the user does your app's core action (this event name is only an example):
+whisperr.track("report_exported", { format: "pdf" });
 
 // On logout:
 whisperr.reset();
