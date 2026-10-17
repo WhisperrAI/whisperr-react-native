@@ -385,7 +385,7 @@ describe("version context (C5)", () => {
         app_build: "200",
         platform: "ios",
         sdk_name: "whisperr-react-native",
-        sdk_version: "0.6.0",
+        sdk_version: "0.7.0",
       });
       expect(e.context).not.toHaveProperty("locale");
     }

@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.7.0
+
+Engagement signals (whisperr-spec, signals v3). Send these to a Whisperr
+backend that knows `app_error` and `app_crashed`.
+
+- **Sessions:** `context.session_id` is on every event, and a cold start now
+  always starts a new session (before, a session continued across a restart
+  within 30 minutes). The 30-minute idle rule is unchanged.
+- **`app_backgrounded`** adds `session_id`, `screen_count`,
+  `unique_screen_count`, `event_count` and `error_count` for the foreground
+  visit. `foreground_ms` uses a monotonic clock.
+- **`app_opened`** adds `launch_source` (`push`, `shortcut`, `widget`,
+  `email`, `universal_link`, `deep_link`, `direct`), with
+  `whisperr_message_id`, `link_route` (redacted path), `link_host` and
+  `utm_*` when they apply, and `first_after_update` on the first open after
+  an update. Links come from `Linking` automatically; push from
+  `trackPushOpened()`. `app_opened` waits up to 1.5 s for the source
+  (`launchSourceWindowMs`), and `flush()` sends it at once.
+- **`app_error`** (new): uncaught JS errors through `ErrorUtils` (chained to
+  the previous handler) and, in release builds on Hermes, unhandled promise
+  rejections. New `trackError(error, { screen, kind })` for handled errors.
+  Only the error type and a fingerprint are sent. One per fingerprint and 20
+  per session.
+- **`app_crashed`** (new): on the next launch, before `app_opened`, when the
+  app ended in the foreground; `crash` / `js_fatal` after a fatal JS error.
+  Never in development builds.
+- **`captureErrors: false`** turns automatic error and crash capture off.
+- **`whisperrNavigationTracker(ref)`** sends `screen_viewed` from React
+  Navigation, without a dependency on it.
+
 ## 0.6.0
 
 **Release this version only after the Whisperr backend with client email

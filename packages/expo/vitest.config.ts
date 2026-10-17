@@ -13,10 +13,12 @@ export default defineConfig({
       "expo-notifications": root("./test/expo-notifications.ts"),
       "expo-constants": root("./test/expo-constants.ts"),
       "expo-application": root("./test/expo-application.ts"),
+      "expo-router": root("./test/expo-router.ts"),
     },
   },
   test: {
     environment: "node",
     include: ["src/**/*.test.ts", "plugin/src/**/*.test.ts"],
+    setupFiles: ["../../test/setup.ts"],
   },
 });

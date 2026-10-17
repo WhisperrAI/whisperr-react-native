@@ -2,10 +2,11 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SPEC_REF } from "../test/spec.js";
-import { __setAppState, __setPlatform, AppState } from "../test/react-native.js";
+import { __setAppState, __setInitialURL, __setPlatform, AppState } from "../test/react-native.js";
 import { SDK_NAME } from "./autocapture.js";
 import { WhisperrClient } from "./client.js";
 import { LIB_VERSION } from "./runtime.js";
+import { errorFingerprint } from "./signals.js";
 import { MemoryStorage } from "./storage.js";
 import type { PushPermissionStatus } from "./types.js";
 
@@ -23,7 +24,16 @@ const realFetch = globalThis.fetch.bind(globalThis);
 const RealDate = Date;
 
 type Step =
-  | { launch: { appVersion?: string; appBuild?: string } }
+  | {
+      launch: {
+        appVersion?: string;
+        appBuild?: string;
+        via?: { push?: Record<string, unknown>; link?: string; shortcut?: unknown };
+      };
+    }
+  | { track: string }
+  | { trackError: { name: string; kind?: string; screen?: string } }
+  | { uncaughtError: { name: string; fatal: boolean } }
   | { background: { afterMs: number } }
   | { foreground: { afterMs: number } }
   | { terminate: true }
@@ -39,7 +49,7 @@ type Step =
 interface AutomaticCase {
   name: string;
   storage?: "empty" | "legacy_sdk_state";
-  config?: { automaticEvents?: boolean };
+  config?: { automaticEvents?: boolean; captureErrors?: boolean; debugBuild?: boolean };
   device: { osVersion?: string; locale?: string; timezone?: string; timezoneOffsetMinutes?: number };
   steps: Step[];
   expectedEvents: Array<{ event_type: string; properties: Record<string, unknown>; context?: Record<string, unknown> }>;
@@ -53,7 +63,13 @@ interface PushEventsV2 {
 /** Context keys contract v2 governs: a named one must match, an unnamed one must be absent. */
 const GOVERNED = ["app_version", "app_build", "platform", "sdk_name", "sdk_version", "locale"];
 
-async function loadSpec(): Promise<{ cases: AutomaticCase[]; pushEventsV2?: PushEventsV2 }> {
+interface SignalsV3 {
+  legacyStrip: { events: string[]; properties: string[] };
+  fingerprintVectors: Array<{ errorName: string; frames: string[]; fingerprint: string }>;
+  sections: Record<string, { appliesTo: string[]; cases: AutomaticCase[] }>;
+}
+
+async function loadSpec(): Promise<{ cases: AutomaticCase[]; pushEventsV2?: PushEventsV2; signalsV3?: SignalsV3 }> {
   // automatic.json lives next to wire.json.
   const wire = process.env.WHISPERR_SPEC_PATH;
   const local = process.env.WHISPERR_AUTOMATIC_SPEC_PATH ?? (wire ? join(dirname(wire), "automatic.json") : null);
@@ -75,9 +91,14 @@ const PLACEHOLDERS: Record<string, string> = {
   $platform: "ios",
   $sdk_name: SDK_NAME,
   $sdk_version: LIB_VERSION,
+  $error_kind: "js",
+  $fatal_detected_by: "js_fatal",
 };
 
 afterEach(() => {
+  delete (globalThis as { __DEV__?: boolean }).__DEV__;
+  delete (globalThis as { ErrorUtils?: unknown }).ErrorUtils;
+  __setInitialURL(null);
   vi.unstubAllGlobals();
   vi.useRealTimers();
   vi.restoreAllMocks();
@@ -93,19 +114,61 @@ const superseded = new Set(
   (pushEventsV2?.supersedes ?? []).filter((e) => e.startsWith("automatic.json:")).map((e) => e.split(":")[1]),
 );
 
+// This SDK sends the signals v3 properties and events on every launch. The
+// legacy cases keep their v1 meaning with them stripped (signalsV3.legacyStrip;
+// the same list until the spec that defines it is on main).
+const signalsV3 = spec.signalsV3;
+const legacyStrip = signalsV3?.legacyStrip ?? {
+  events: ["app_error", "app_crashed"],
+  properties: [
+    "launch_source",
+    "whisperr_message_id",
+    "link_route",
+    "link_host",
+    "utm_source",
+    "utm_medium",
+    "utm_campaign",
+    "first_after_update",
+    "session_id",
+    "screen_count",
+    "unique_screen_count",
+    "event_count",
+    "error_count",
+  ],
+};
+
 describe("automatic events conformance (whisperr-spec)", () => {
   it("has cases", () => expect(spec.cases.length).toBeGreaterThan(0));
   it.each(spec.cases.filter((c) => !superseded.has(c.name)).map((c) => [c.name, c] as const))("%s", (_name, c) =>
-    runCase(c),
+    runCase(c, true),
   );
 });
 
 describe("contract v2 push events (automatic.json pushEventsV2)", () => {
   it("has cases", () => expect(pushEventsV2?.cases.length ?? 0).toBeGreaterThan(0));
-  it.each((pushEventsV2?.cases ?? []).map((c) => [c.name, c] as const))("%s", (_name, c) => runCase(c));
+  it.each((pushEventsV2?.cases ?? []).map((c) => [c.name, c] as const))("%s", (_name, c) => runCase(c, true));
 });
 
-async function runCase(c: AutomaticCase): Promise<void> {
+const v3Cases = Object.entries(signalsV3?.sections ?? {})
+  .filter(([, section]) => section.appliesTo.includes("mobile"))
+  .flatMap(([name, section]) => section.cases.map((c) => [`${name}: ${c.name}`, c] as const));
+
+describe.skipIf(!signalsV3)("signals v3 (automatic.json signalsV3)", () => {
+  it.each(v3Cases)("%s", (_name, c) => runCase(c, false));
+  it.each((signalsV3?.fingerprintVectors ?? []).map((v) => [v.errorName, v] as const))(
+    "fingerprint vector %s",
+    (_name, v) => expect(errorFingerprint(v.errorName, v.frames)).toBe(v.fingerprint),
+  );
+});
+
+/** An error of type `name` whose message must never be sent. */
+function namedError(name: string): Error {
+  const error = new Error("secret message: user@example.com");
+  error.name = name;
+  return error;
+}
+
+async function runCase(c: AutomaticCase, legacy: boolean): Promise<void> {
   const sent: any[] = [];
   vi.stubGlobal(
     "fetch",
@@ -128,6 +191,15 @@ async function runCase(c: AutomaticCase): Promise<void> {
 
   const storage = new MemoryStorage();
   if (c.storage === "legacy_sdk_state") storage.setItem("whisperr.user_id", "user_1");
+  if (c.config?.debugBuild) (globalThis as { __DEV__?: boolean }).__DEV__ = true;
+  // The harness's own global handler: the SDK must keep calling it.
+  let harnessHandlerCalls = 0;
+  let globalHandler: (error: unknown, isFatal?: boolean) => void = () => void harnessHandlerCalls++;
+  (globalThis as { ErrorUtils?: unknown }).ErrorUtils = {
+    getGlobalHandler: () => globalHandler,
+    setGlobalHandler: (h: typeof globalHandler) => void (globalHandler = h),
+  };
+  let uncaught = 0;
 
   let w: WhisperrClient | null = null;
   const client = (): WhisperrClient => {
@@ -144,16 +216,31 @@ async function runCase(c: AutomaticCase): Promise<void> {
   for (const step of c.steps) {
     if ("launch" in step) {
       AppState.currentState = "active";
+      __setInitialURL(step.launch.via?.link ?? null);
       w = new WhisperrClient({
         apiKey: "wrk_test",
         storage,
         flushIntervalMs: 0,
         maxRetries: 0,
         trackAppLifecycleEvents: c.config?.automaticEvents ?? true,
+        captureErrors: c.config?.captureErrors ?? true,
         appVersion: step.launch.appVersion,
         appBuild: step.launch.appBuild,
       });
       w.identify("user_1");
+      __setInitialURL(null);
+      if (step.launch.via?.push) w.trackPushOpened(step.launch.via.push, { coldStart: true });
+    } else if ("track" in step) {
+      client().track(step.track);
+    } else if ("trackError" in step) {
+      client().trackError(namedError(step.trackError.name), {
+        ...(step.trackError.kind ? { kind: step.trackError.kind as "network" } : {}),
+        ...(step.trackError.screen ? { screen: step.trackError.screen } : {}),
+      });
+    } else if ("uncaughtError" in step) {
+      uncaught++;
+      globalHandler(namedError(step.uncaughtError.name), step.uncaughtError.fatal);
+      expect(harnessHandlerCalls, `${c.name}: the previous global handler still runs`).toBe(uncaught);
     } else if ("background" in step) {
       advance(step.background.afterMs);
       __setAppState("background");
@@ -194,19 +281,56 @@ async function runCase(c: AutomaticCase): Promise<void> {
   if (w) await w.close();
 
   for (const event of sent) expect(event.context?.$message_id, `${c.name}: $message_id`).toBeTruthy();
+  expect(JSON.stringify(sent), `${c.name}: no error message is sent`).not.toContain("secret message");
+  if (legacy) {
+    // Signals v3 additions are not part of the legacy cases.
+    const strip = new Set(legacyStrip.properties);
+    const kept = sent.filter((e) => !legacyStrip.events.includes(e.event_type));
+    // A key the legacy case itself expects (push_opened's whisperr_message_id) stays.
+    kept.forEach((e, i) => {
+      const expected = c.expectedEvents[i]?.properties ?? {};
+      for (const key of Object.keys(e.properties ?? {})) if (strip.has(key) && !(key in expected)) delete e.properties[key];
+    });
+    sent.splice(0, sent.length, ...kept);
+  }
+  // $session_<x> / $fp_<x>: bound to the first value seen; distinct placeholders, distinct values.
+  const bound = new Map<string, unknown>();
+  const bind = (placeholder: string, actual: unknown, shape: RegExp): unknown => {
+    if (!bound.has(placeholder)) {
+      if (typeof actual !== "string" || !shape.test(actual)) return placeholder;
+      if ([...bound.values()].includes(actual)) return placeholder;
+      bound.set(placeholder, actual);
+    }
+    return bound.get(placeholder);
+  };
+  const SESSION = /^sess_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  const resolve = (v: unknown, actual: unknown): unknown => {
+    if (typeof v !== "string") return v;
+    if (v.startsWith("$session_")) return bind(v, actual, SESSION);
+    if (v.startsWith("$fp_")) return bind(v, actual, /^[0-9a-f]{16}$/);
+    return v in PLACEHOLDERS ? PLACEHOLDERS[v] : v;
+  };
+  c.expectedEvents.forEach((e, i) => {
+    const sid = e.context?.session_id;
+    if (typeof sid === "string") {
+      expect(sent[i]?.context?.session_id, `${c.name} event ${i} context.session_id`).toBe(
+        resolve(sid, sent[i]?.context?.session_id),
+      );
+    }
+  });
   const sub = (v: unknown) => (typeof v === "string" && v in PLACEHOLDERS ? PLACEHOLDERS[v] : v);
   c.expectedEvents.forEach((e, i) => {
-    if (!e.context) return;
+    if (!e.context || !legacy) return; // signals v3 cases name only context.session_id
     for (const key of GOVERNED) {
       if (key in e.context) expect(sent[i]?.context?.[key], `${c.name} event ${i} context.${key}`).toEqual(sub(e.context[key]));
       else expect(sent[i]?.context, `${c.name} event ${i} context.${key} absent`).not.toHaveProperty(key);
     }
   });
   const actual = sent.map((e) => ({ event_type: e.event_type, properties: e.properties ?? {} }));
-  const expected = c.expectedEvents.map((e) => ({
+  const expected = c.expectedEvents.map((e, i) => ({
     event_type: e.event_type,
     properties: Object.fromEntries(
-      Object.entries(e.properties).map(([k, v]) => [k, typeof v === "string" && v in PLACEHOLDERS ? PLACEHOLDERS[v] : v]),
+      Object.entries(e.properties).map(([k, v]) => [k, resolve(v, sent[i]?.properties?.[k])]),
     ),
   }));
   expect(actual, c.name).toEqual(expected);

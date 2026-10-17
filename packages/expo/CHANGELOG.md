@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.0
+
+- **`useWhisperrScreens()`** sends `screen_viewed` for each expo-router route,
+  with the route template (`/lesson/[id]`) as `screen_name`. expo-router is an
+  optional peer; without it the hook does nothing.
+- Notification taps that open the app now also set `launch_source: "push"` on
+  that `app_opened` with `@whisperr/react-native` 0.7.0 or later. No change in
+  this package was needed for that.
+
 ## 0.1.1
 
 - **README:** the link to `@whisperr/react-native` pointed at

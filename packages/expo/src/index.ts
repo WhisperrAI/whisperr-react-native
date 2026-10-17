@@ -4,6 +4,7 @@
  * - `registerForPushNotifications()` — permission + Expo push token → Whisperr
  * - `useWhisperrNotificationResponse()` — `push_opened` + the deep link for your router, and `push_received`
  * - `requestPushAuthorization({ provisional })` — the OS prompt (or quiet iOS delivery), reported to Whisperr
+ * - `useWhisperrScreens()` — `screen_viewed` with expo-router route templates
  * - the config plugin (`"plugins": ["@whisperr/expo"]`) — native push setup at prebuild
  */
 export {
@@ -29,3 +30,4 @@ export {
   type NotificationReceiptOptions,
   type WhisperrNotificationOpen,
 } from "./opens.js";
+export { useWhisperrScreens, routeTemplate, type WhisperrScreensOptions } from "./screens.js";
