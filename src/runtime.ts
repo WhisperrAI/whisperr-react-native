@@ -1,8 +1,6 @@
 /** Runtime primitives shared across the SDK. */
 
-import type { SafeStorage } from "./storage.js";
-
-export const LIB_VERSION = "0.6.0";
+export const LIB_VERSION = "0.7.0";
 
 /**
  * RFC4122 v4 id. Uses crypto.randomUUID, then crypto.getRandomValues, when the
@@ -40,45 +38,63 @@ export function nowISO(): string {
   return new Date().toISOString();
 }
 
+// ---- clocks ----
+
+type Clock = () => number;
+
+function defaultMonotonic(): number {
+  const perf = (globalThis as { performance?: { now?: () => number } }).performance;
+  return perf && typeof perf.now === "function" ? perf.now() : Date.now();
+}
+
+let monotonic: Clock = defaultMonotonic;
+
+/**
+ * Milliseconds on a clock that never jumps (performance.now in Hermes), for
+ * durations such as `foreground_ms`. Falls back to the wall clock.
+ */
+export function monotonicNow(): number {
+  return monotonic();
+}
+
+/** Test hook: replace the monotonic clock (null restores the default). */
+export function __setMonotonicClock(clock: Clock | null): void {
+  monotonic = clock ?? defaultMonotonic;
+}
+
+/** A development build (React Native's `__DEV__`). Tests set `globalThis.__DEV__`. */
+export function isDevBuild(): boolean {
+  return (globalThis as { __DEV__?: unknown }).__DEV__ === true;
+}
+
 // ---- session ----
 
-const SESSION_KEY = "whisperr.session";
 const SESSION_TIMEOUT_MS = 30 * 60 * 1000;
 
 /**
- * A 30-minute-inactivity session id. State lives in memory (reads must be
- * synchronous at track() time); persistence is write-behind so sessions
- * continue across quick app restarts.
+ * The session id (`sess_<uuid>`): a new one on every cold start (each client
+ * starts without one) and after 30 minutes with no event. In memory only:
+ * reads must be synchronous at track() time, and a new process is a new session.
  */
 export class Session {
   private id: string | null = null;
   private last = 0;
+  private lastMono = 0;
 
-  constructor(private readonly storage: SafeStorage) {}
-
-  /** Adopt a persisted session if it hasn't expired. Called once at init. */
-  async restore(): Promise<void> {
-    const raw = await this.storage.get(SESSION_KEY);
-    if (!raw || this.id) return; // an event already started a session — keep it
-    try {
-      const s = JSON.parse(raw) as { id: string; last: number };
-      if (typeof s.id === "string" && Date.now() - s.last < SESSION_TIMEOUT_MS) {
-        this.id = s.id;
-        this.last = s.last;
-      }
-    } catch {
-      /* corrupt — start fresh on next use */
-    }
-  }
-
-  /** Returns the current session id, rolling it over after inactivity. */
+  /**
+   * Returns the current session id, rolling it over after inactivity. The gap
+   * is measured on both clocks and either one reaching 30 minutes rolls it:
+   * the monotonic clock can stop while the device sleeps, and the wall clock
+   * can be set back.
+   */
   current(): string {
     const now = Date.now();
-    if (!this.id || now - this.last >= SESSION_TIMEOUT_MS) {
+    const mono = monotonicNow();
+    if (!this.id || now - this.last >= SESSION_TIMEOUT_MS || mono - this.lastMono >= SESSION_TIMEOUT_MS) {
       this.id = `sess_${uuid()}`;
     }
     this.last = now;
-    void this.storage.set(SESSION_KEY, JSON.stringify({ id: this.id, last: now }));
+    this.lastMono = mono;
     return this.id;
   }
 }

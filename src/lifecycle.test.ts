@@ -15,6 +15,9 @@ vi.mock("./device.js", async (importOriginal) => ({
 let captured: Array<{ path: string; body: any }> = [];
 
 beforeEach(() => {
+  // Relaunches here end in the foreground; a debug build sends no app_crashed.
+  // Crash reporting has its own tests (signals.test.ts).
+  (globalThis as { __DEV__?: boolean }).__DEV__ = true;
   captured = [];
   device.traits = { timezone: "Europe/Berlin", locale: "de-DE" };
   vi.stubGlobal(
@@ -27,6 +30,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  delete (globalThis as { __DEV__?: boolean }).__DEV__;
   vi.unstubAllGlobals();
   vi.useRealTimers();
   AppState.currentState = "active";
@@ -76,7 +80,7 @@ describe("automatic lifecycle events", () => {
 
     expect(names()).toEqual(["app_installed", "app_opened"]);
     expect(events()[0].properties).toEqual(FLAT);
-    expect(events()[1].properties).toEqual({ ...FLAT, cold_start: true });
+    expect(events()[1].properties).toEqual({ ...FLAT, cold_start: true, launch_source: "direct" });
     // Sent under the anonymous handle until identify().
     expect(events()[0].anonymous_id).toBeTruthy();
     await w.close();
@@ -171,7 +175,15 @@ describe("automatic lifecycle events", () => {
     __setAppState("inactive"); // iOS passes through inactive: no event of its own
     __setAppState("background");
     await vi.waitFor(() => expect(names()).toEqual(["app_backgrounded"])); // flushed on background
-    expect(events()[0].properties).toEqual({ ...FLAT, foreground_ms: 42500 });
+    expect(events()[0].properties).toEqual({
+      ...FLAT,
+      foreground_ms: 42500,
+      session_id: events()[0].context.session_id,
+      screen_count: 0,
+      unique_screen_count: 0,
+      event_count: 0,
+      error_count: 0,
+    });
     expect(events()[0].occurred_at).toBe("2026-10-05T12:00:42.500Z");
 
     captured = [];

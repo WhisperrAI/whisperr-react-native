@@ -17,7 +17,16 @@ import {
 } from "./autocapture.js";
 import { ASYNC_STORAGE_PACKAGE, loadDefaultStorage } from "./default-storage.js";
 import { deviceTraits } from "./device.js";
-import { currentAppState, currentOS, currentOSInfo, onAppStateChange, type AppStateStatus } from "./lifecycle.js";
+import { addErrorSink } from "./errors.js";
+import {
+  currentAppState,
+  currentOS,
+  currentOSInfo,
+  initialURL,
+  onAppStateChange,
+  onOpenURL,
+  type AppStateStatus,
+} from "./lifecycle.js";
 import { requestPermission } from "./push-authorization.js";
 import { detectPushEnvironment, type PushEnvironmentInfo } from "./push-environment.js";
 import {
@@ -33,7 +42,19 @@ import {
   type PushRegistration,
 } from "./push.js";
 import { DurableQueue } from "./queue.js";
-import { LIB_VERSION, nowISO, Session, uuid } from "./runtime.js";
+import { isDevBuild, LIB_VERSION, monotonicNow, nowISO, Session, uuid } from "./runtime.js";
+import {
+  APP_CRASHED,
+  APP_ERROR,
+  ERROR_KINDS,
+  errorFingerprint,
+  errorName,
+  linkSignal,
+  stackFrames,
+  strongerSignal,
+  type ErrorKind,
+  type LaunchSignal,
+} from "./signals.js";
 import { MemoryStorage, SafeStorage } from "./storage.js";
 import { Transport, type SendOutcome } from "./transport.js";
 import type {
@@ -45,6 +66,7 @@ import type {
   PushReceivedOptions,
   PushTokenInput,
   QueuedOp,
+  TrackErrorOptions,
   TrackOp,
   WhisperrApi,
   WhisperrChannel,
@@ -84,6 +106,60 @@ const RESTORE_THROTTLE_MS = 24 * 60 * 60 * 1000;
 const PUSH_REREGISTER_MS = 7 * 24 * 60 * 60 * 1000;
 /** An open this soon after the client start, with no background since, is a cold start. */
 const COLD_START_WINDOW_MS = 10_000;
+/** `{ running, session_id, screen, app_version }` while the app is in the foreground (unclean-shutdown flag). */
+const RUN_KEY = "whisperr.run_state";
+/** `{ at, session_id, screen, app_version }` of the last fatal JS error. */
+const FATAL_KEY = "whisperr.last_fatal";
+const DEFAULT_LAUNCH_WINDOW_MS = 1500;
+/** A link resolves the launch source after this short grace, so a push tap that arrives with it still wins. */
+const LINK_GRACE_MS = 250;
+const MAX_ERRORS_PER_SESSION = 20;
+const CRASH_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+/** Event types that are not the app's own `track()` events (they never count in `event_count`). */
+const RESERVED_EVENTS = new Set([
+  APP_INSTALLED,
+  APP_UPDATED,
+  APP_OPENED,
+  APP_BACKGROUNDED,
+  SCREEN_VIEWED,
+  PUSH_OPENED,
+  PUSH_RECEIVED,
+  PUSH_PERMISSION_CHANGED,
+  APP_ERROR,
+  APP_CRASHED,
+]);
+
+/** An `app_opened` held while its launch source may still arrive. */
+interface PendingOpen {
+  properties: Record<string, unknown>;
+  /** Wall-clock time of the foreground (occurred_at). */
+  at: number;
+  /** Monotonic deadline of the attribution window. */
+  deadline: number;
+  signal: LaunchSignal | null;
+  timer: ReturnType<typeof setTimeout> | null;
+}
+
+/** What one foreground visit did, reported on app_backgrounded. */
+interface VisitCounters {
+  screens: number;
+  uniqueScreens: Set<string>;
+  events: number;
+  errors: number;
+}
+
+function newVisit(): VisitCounters {
+  return { screens: 0, uniqueScreens: new Set(), events: 0, errors: 0 };
+}
+
+/** The run-state and last-fatal records (both optional fields). */
+interface RunRecord {
+  running?: boolean;
+  at?: number;
+  session_id?: string;
+  screen?: string;
+  app_version?: string;
+}
 
 /** Who a push token or an identify is for: the user, or (before login) the device's anonymous handle. */
 type Subject = { userId: string } | { anonymousId: string };
@@ -186,8 +262,34 @@ export class WhisperrClient implements WhisperrApi {
   private readonly appInfo: AppInfo;
   /** Lifecycle handling runs in order, after init, with the timestamps captured at the transition. */
   private lifecycleChain: Promise<void> = Promise.resolve();
-  /** When the current foreground period started; null while in the background. */
+  /** When the current foreground period started (monotonic ms); null while in the background. */
   private foregroundSince: number | null = null;
+  /** WhisperrOptions.captureErrors. */
+  private readonly captureErrors: boolean;
+  /** WhisperrOptions.captureUnhandledRejections (only with captureErrors). */
+  private readonly captureRejections: boolean;
+  /** app_crashed needs the foreground flag the lifecycle writes. */
+  private readonly crashTracking: boolean;
+  private readonly launchWindowMs: number;
+  /** The run-state and last-fatal records of the previous process, read before this one writes. */
+  private readonly launchRun: Promise<string | null>;
+  private readonly launchFatal: Promise<string | null>;
+  /** The run-state flag is set (this process is in the foreground). */
+  private running = false;
+  /** app_updated was sent this launch: the next app_opened is the first after the update. */
+  private firstAfterUpdate = false;
+  private pendingOpen: PendingOpen | null = null;
+  /** Launch signals that arrived before their foreground (monotonic ms). */
+  private earlySignals: Array<{ signal: LaunchSignal; at: number }> = [];
+  private visit: VisitCounters = newVisit();
+  /** The last screen_viewed name (app_error screen_name, crashed_screen_name). */
+  private lastScreen: string | null = null;
+  /** app_error caps: the session they count for, its fingerprints, and how many went out. */
+  private errorSessionId: string | null = null;
+  private errorFingerprints = new Set<string>();
+  private errorsSent = 0;
+  private removeErrorSink: () => void = () => {};
+  private removeLinking: () => void = () => {};
   /** A foreground was seen in this process — the next app_opened is a warm start. */
   private sawForeground = false;
 
@@ -211,6 +313,12 @@ export class WhisperrClient implements WhisperrApi {
     this.disabled = !!options.disabled;
     this.autocapture = !this.disabled && (options.trackAppLifecycleEvents ?? true);
     this.flushOnBackground = options.flushOnAppBackground ?? true;
+    // Automatic error capture is an automatic event: trackAppLifecycleEvents: false stops it too.
+    this.captureErrors = this.autocapture && (options.captureErrors ?? true);
+    this.captureRejections = this.captureErrors && options.captureUnhandledRejections === true;
+    // The unclean-shutdown flag follows the automatic-events switch only.
+    this.crashTracking = this.autocapture;
+    this.launchWindowMs = Math.max(0, options.launchSourceWindowMs ?? DEFAULT_LAUNCH_WINDOW_MS);
     // Manual screen(), push_opened and push_permission_changed carry these
     // too, so they resolve even with the automatic events off.
     this.appInfo = this.disabled ? {} : resolveAppInfo({ version: options.appVersion, build: options.appBuild });
@@ -229,10 +337,12 @@ export class WhisperrClient implements WhisperrApi {
     );
     this.launchPush = this.storage.get(PUSH_KEY);
     this.launchLanguage = this.storage.get(APP_LANGUAGE_KEY);
+    this.launchRun = this.storage.get(RUN_KEY);
+    this.launchFatal = this.storage.get(FATAL_KEY);
     this.persistedOpened = new RememberedIds(this.storage, PUSH_OPENED_KEY);
     this.persistedReceived = new RememberedIds(this.storage, PUSH_RECEIVED_KEY);
     this.queue = new DurableQueue(this.storage, options.maxQueueSize ?? 1000);
-    this.session = new Session(this.storage);
+    this.session = new Session();
     this.transport = new Transport(baseUrl, options.apiKey, options.requestTimeoutMs ?? 10000, this.debug);
 
     this.initPromise = this.disabled ? Promise.resolve() : this.init();
@@ -241,8 +351,20 @@ export class WhisperrClient implements WhisperrApi {
       this.startTimer(options.flushIntervalMs ?? 10000);
       if (this.autocapture) {
         const launchedAt = Date.now();
+        const launchedMono = monotonicNow();
         const initialState = currentAppState();
-        void this.runLifecycle(() => this.captureLaunch(initialState, launchedAt));
+        void this.runLifecycle(() => this.captureLaunch(initialState, launchedAt, launchedMono));
+        // Links (custom scheme, universal/app links, widget and shortcut links) for launch_source.
+        void initialURL().then((url) => {
+          if (url) this.noteLaunchURL(url);
+        });
+        this.removeLinking = onOpenURL((url) => this.noteLaunchURL(url));
+      }
+      if (this.captureErrors) {
+        this.removeErrorSink = addErrorSink(
+          { captureUncaught: (error, fatal) => this.captureUncaught(error, fatal) },
+          { rejections: this.captureRejections },
+        );
       }
       if (this.autocapture || this.flushOnBackground) {
         this.removeLifecycle = onAppStateChange((state) => this.handleAppState(state));
@@ -250,7 +372,7 @@ export class WhisperrClient implements WhisperrApi {
       // Drain anything left over from a previous launch (while opted out:
       // a push opt-out that did not reach the server yet).
       void this.initPromise.then(() => {
-        if (!this.closed && this.queue.size > 0) void this.flush();
+        if (!this.closed && this.queue.size > 0) void this.drainQueue();
       });
     }
   }
@@ -320,7 +442,7 @@ export class WhisperrClient implements WhisperrApi {
     if (!denied) this.pendingPushToken = null;
     // Pre-login events still queued go out under this user directly.
     this.queue.backfillIdentity(externalUserId, this.anonId || undefined);
-    void this.flush();
+    void this.drainQueue();
   }
 
   setAppLanguage(tag: string | null): void {
@@ -384,6 +506,13 @@ export class WhisperrClient implements WhisperrApi {
       this.log(`invalid event_type "${type}" — event was not queued`);
       return;
     }
+    if (type === SCREEN_VIEWED) {
+      this.visit.screens++;
+      const screenName = properties?.screen_name;
+      if (typeof screenName === "string") this.visit.uniqueScreens.add(screenName);
+    } else if (!RESERVED_EVENTS.has(type)) {
+      this.visit.events++;
+    }
     this.enqueueTrack(type, properties, context, nowISO());
   }
 
@@ -393,7 +522,16 @@ export class WhisperrClient implements WhisperrApi {
       this.log("screen() needs a screen name — event was not queued");
       return;
     }
+    if (!this.muted && !this.closed) {
+      this.lastScreen = screenName;
+      if (this.running) this.writeRunState();
+    }
     this.track(SCREEN_VIEWED, { ...automaticProperties(this.appInfo), ...properties, screen_name: screenName });
+  }
+
+  trackError(error: unknown, options: TrackErrorOptions = {}): void {
+    const kind = ERROR_KINDS.includes(options.kind as ErrorKind) ? (options.kind as ErrorKind) : "handled";
+    this.recordError(error, kind, false, cleanString(options.screen));
   }
 
   trackPushOpened(data: unknown, options: PushOpenedOptions = {}): WhisperrPushOpen | null {
@@ -417,8 +555,10 @@ export class WhisperrClient implements WhisperrApi {
       typeof options.coldStart === "boolean"
         ? options.coldStart
         : !this.sawBackground && Date.now() - this.startedAt < COLD_START_WINDOW_MS;
-    void this.initPromise.then(() => {
+    // After the launch handling, so the app_opened this tap resolves goes out first.
+    void this.runLifecycle(() => {
       if (this.muted || this.closed || this.persistedOpened.has(messageId)) return;
+      this.noteLaunchSignal({ source: "push", properties: { whisperr_message_id: messageId.slice(0, 128) } });
       this.enqueueTrack(
         PUSH_OPENED,
         {
@@ -435,7 +575,7 @@ export class WhisperrClient implements WhisperrApi {
       // has landed: a kill in between re-reports the open next launch rather
       // than losing it.
       this.persistedOpened.add(messageId, this.queue.settle());
-      void this.flush();
+      void this.drainQueue();
     });
     return payload;
   }
@@ -507,7 +647,7 @@ export class WhisperrClient implements WhisperrApi {
       const reg = this.pendingPushToken ?? (last ? registrationFromMeta(last.token, last.meta) : null);
       if (reg) this.registerPushToken(reg);
     }
-    if (last) void this.flush();
+    if (last) void this.drainQueue();
   }
 
   optIn(): void {
@@ -527,7 +667,12 @@ export class WhisperrClient implements WhisperrApi {
     if (this.initialized) this.queuePushOptOut();
   }
 
-  async flush(): Promise<void> {
+  flush(): Promise<void> {
+    this.finishOpen(); // a held app_opened goes out with what is known
+    return this.drainQueue();
+  }
+
+  private async drainQueue(): Promise<void> {
     if (this.closed) return;
     // Serialize drains and guarantee that awaiting flush() waits for a drain
     // pass that runs AFTER this call — so `await whisperr.flush()` before logout
@@ -542,6 +687,9 @@ export class WhisperrClient implements WhisperrApi {
     await this.lifecycleChain; // queue lifecycle events still in flight, then deliver them
     await this.flush();
     this.closed = true;
+    this.removeErrorSink();
+    this.removeLinking();
+    // The run-state flag stays: a process that ends in the foreground did not shut down cleanly.
     if (this.flushTimer) clearInterval(this.flushTimer);
     this.flushTimer = null;
     this.removeLifecycle();
@@ -598,7 +746,6 @@ export class WhisperrClient implements WhisperrApi {
 
     await this.persistedOpened.load();
     await this.persistedReceived.load();
-    await this.session.restore();
     await this.queue.restore();
 
     if (this.optedOut) {
@@ -687,7 +834,7 @@ export class WhisperrClient implements WhisperrApi {
     const op = subjectIdentify(this.subject(), { traits: { app_language: language } });
     // A delivered language update for a user refreshes the restore record.
     this.enqueue(op.externalUserId ? { ...op, languageUpdate: true } : op);
-    void this.flush();
+    void this.drainQueue();
   }
 
   /** What init does with push tokens once the subject is known. */
@@ -698,7 +845,7 @@ export class WhisperrClient implements WhisperrApi {
       // identify() set since).
       if (pairBeforeReset) {
         this.enqueue(subjectIdentify(pairSubject(pairBeforeReset), { channels: [optOutChannel(pairBeforeReset.token)] }));
-        void this.flush();
+        void this.drainQueue();
       }
       const reg =
         this.pendingPushToken ??
@@ -750,7 +897,7 @@ export class WhisperrClient implements WhisperrApi {
     // Mark BEFORE enqueue so an overflow-evicted registration clears the mark.
     this.setLastPush(subject, send.token, pushMeta(send) || last?.meta);
     this.enqueue(subjectIdentify(subject, { channels }));
-    void this.flush();
+    void this.drainQueue();
   }
 
   private applyPermission(status: PushPermissionStatus): void {
@@ -775,7 +922,7 @@ export class WhisperrClient implements WhisperrApi {
     const subject = this.subject();
     const channels = this.permissionChannels(status, subject);
     if (channels.length) this.enqueue(subjectIdentify(subject, { channels }));
-    void this.flush();
+    void this.drainQueue();
   }
 
   /**
@@ -818,7 +965,7 @@ export class WhisperrClient implements WhisperrApi {
     this.forgetLastPush();
     if (!last) return;
     this.enqueue(subjectIdentify(pairSubject(last), { channels: [optOutChannel(last.token)] }));
-    void this.flush();
+    void this.drainQueue();
   }
 
   /** The current subject: the user, else (before login) the anonymous handle. */
@@ -887,38 +1034,244 @@ export class WhisperrClient implements WhisperrApi {
   private handleAppState(state: AppStateStatus): void {
     if (this.closed) return;
     const at = Date.now();
+    const mono = monotonicNow();
     if (state === "background") this.sawBackground = true;
-    const queued = this.autocapture ? this.runLifecycle(() => this.captureTransition(state, at)) : Promise.resolve();
+    const queued = this.autocapture
+      ? this.runLifecycle(() => this.captureTransition(state, at, mono))
+      : Promise.resolve();
     if (this.flushOnBackground && (state === "background" || state === "inactive")) {
       // After app_backgrounded is queued, so the last foreground period ships now.
-      void queued.then(() => this.flush());
+      void queued.then(() => this.drainQueue());
     }
   }
 
-  private async captureLaunch(initialState: AppStateStatus | undefined, launchedAt: number): Promise<void> {
+  private async captureLaunch(
+    initialState: AppStateStatus | undefined,
+    launchedAt: number,
+    launchedMono: number,
+  ): Promise<void> {
     if (this.durableStorage) await this.captureInstallOrUpdate(launchedAt);
+    // The previous process's crash, before this launch's app_opened.
+    await this.captureCrash(launchedAt);
     // A launch into the background (headless JS, background fetch) is not an
     // open; the first move to "active" reports the cold start instead.
     if (initialState === undefined || initialState === "active" || initialState === "unknown") {
-      this.captureTransition("active", launchedAt);
+      this.captureTransition("active", launchedAt, launchedMono);
     }
   }
 
-  private captureTransition(state: AppStateStatus, at: number): void {
+  private captureTransition(state: AppStateStatus, at: number, mono: number): void {
     if (state === "active") {
+      this.markRunning();
       if (this.foregroundSince !== null) return; // already in the foreground
-      this.foregroundSince = at;
+      this.foregroundSince = mono;
       const coldStart = !this.sawForeground;
       this.sawForeground = true;
-      this.captureAutomatic(APP_OPENED, { cold_start: coldStart }, at);
+      this.holdOpen(coldStart, at, mono);
     } else if (state === "background") {
+      this.clearRunning();
       if (this.foregroundSince === null) return;
-      const foregroundMs = Math.max(0, at - this.foregroundSince);
+      this.finishOpen(); // backgrounded inside the window: send what is known
+      const foregroundMs = Math.max(0, Math.round(mono - this.foregroundSince));
       this.foregroundSince = null;
-      this.captureAutomatic(APP_BACKGROUNDED, { foreground_ms: foregroundMs }, at);
+      const visit = this.visit;
+      this.visit = newVisit();
+      this.captureAutomatic(
+        APP_BACKGROUNDED,
+        {
+          foreground_ms: foregroundMs,
+          session_id: this.session.current(),
+          screen_count: visit.screens,
+          unique_screen_count: visit.uniqueScreens.size,
+          event_count: visit.events,
+          error_count: visit.errors,
+        },
+        at,
+      );
+    } else if (state === "inactive") {
+      // Not a transition of its own (iOS passes through it for Control Center,
+      // calls and the app switcher), but a swipe-kill from the app switcher
+      // ends here, so the unclean-shutdown flag is cleared; "active" sets it again.
+      this.clearRunning();
     }
-    // "inactive" is not a transition of its own: iOS passes through it for
-    // Control Center, incoming calls, and the app switcher.
+  }
+
+  // ---- launch source ----
+
+  /** Starts the attribution window for an app_opened. */
+  private holdOpen(coldStart: boolean, at: number, mono: number): void {
+    const properties: Record<string, unknown> = { cold_start: coldStart };
+    if (this.firstAfterUpdate) {
+      properties.first_after_update = true;
+      this.firstAfterUpdate = false;
+    }
+    let signal: LaunchSignal | null = null;
+    for (const early of this.earlySignals) {
+      if (mono - early.at <= this.launchWindowMs) signal = strongerSignal(signal, early.signal);
+    }
+    this.earlySignals = [];
+    this.pendingOpen = { properties, at, deadline: mono + this.launchWindowMs, signal, timer: null };
+    if (this.launchWindowMs === 0 || signal?.source === "push") this.finishOpen();
+    else this.scheduleOpen(signal ? LINK_GRACE_MS : this.launchWindowMs);
+  }
+
+  private scheduleOpen(ms: number): void {
+    const pending = this.pendingOpen;
+    if (!pending) return;
+    if (pending.timer) clearTimeout(pending.timer);
+    const wait = Math.max(0, Math.min(ms, pending.deadline - monotonicNow()));
+    pending.timer = setTimeout(() => this.finishOpen(), wait);
+    (pending.timer as unknown as { unref?: () => void }).unref?.();
+  }
+
+  /** Sends the held app_opened with the strongest launch signal seen (else `direct`). */
+  private finishOpen(): void {
+    const pending = this.pendingOpen;
+    if (!pending) return;
+    this.pendingOpen = null;
+    if (pending.timer) clearTimeout(pending.timer);
+    const signal = pending.signal;
+    this.captureAutomatic(
+      APP_OPENED,
+      { ...pending.properties, launch_source: signal?.source ?? "direct", ...signal?.properties },
+      pending.at,
+    );
+  }
+
+  private noteLaunchURL(url: string): void {
+    const signal = linkSignal(url);
+    if (signal) this.noteLaunchSignal(signal);
+  }
+
+  /**
+   * A push tap or a link: it sets the launch source of the held app_opened,
+   * or of the next one when it arrives just before its foreground. One while
+   * the app is already in the foreground is not a launch.
+   */
+  private noteLaunchSignal(signal: LaunchSignal): void {
+    if (this.closed || !this.autocapture) return;
+    const pending = this.pendingOpen;
+    if (pending) {
+      pending.signal = strongerSignal(pending.signal, signal);
+      if (pending.signal.source === "push") this.finishOpen();
+      else this.scheduleOpen(LINK_GRACE_MS);
+      return;
+    }
+    if (this.foregroundSince !== null) return;
+    this.earlySignals = [...this.earlySignals.slice(-4), { signal, at: monotonicNow() }];
+  }
+
+  // ---- errors and crashes ----
+
+  /** From the global handler: an uncaught JS error (`fatal`: the app is about to terminate). */
+  private captureUncaught(error: unknown, fatal: boolean): void {
+    if (this.closed) return;
+    // The app is about to terminate: an app_opened still waiting for its source goes out now.
+    if (fatal) this.finishOpen();
+    if (fatal && this.crashTracking) {
+      // Best effort: the process may end before the write lands; the run-state flag still reports it.
+      const record: RunRecord = {
+        at: Date.now(),
+        session_id: this.session.current(),
+        ...(this.lastScreen ? { screen: this.lastScreen } : {}),
+        ...(this.appInfo.version ? { app_version: this.appInfo.version } : {}),
+      };
+      void this.storage.set(FATAL_KEY, JSON.stringify(record));
+    }
+    this.recordError(error, "js", fatal);
+  }
+
+  private recordError(error: unknown, kind: ErrorKind, fatal: boolean, screen?: string): void {
+    if (this.muted || this.closed) return;
+    this.visit.errors++; // the true total, including what the caps drop
+    const sessionId = this.session.current();
+    if (sessionId !== this.errorSessionId) {
+      this.errorSessionId = sessionId;
+      this.errorFingerprints = new Set();
+      this.errorsSent = 0;
+    }
+    const name = errorName(error);
+    let stack: unknown;
+    try {
+      stack = (error as { stack?: unknown } | null)?.stack;
+    } catch {
+      stack = undefined;
+    }
+    const fingerprint = errorFingerprint(name, stackFrames(stack));
+    if (this.errorFingerprints.has(fingerprint) || this.errorsSent >= MAX_ERRORS_PER_SESSION) return;
+    this.errorFingerprints.add(fingerprint);
+    this.errorsSent++;
+    const screenName = screen ?? this.lastScreen;
+    // Batched like any event: an error never forces a flush of its own.
+    this.enqueue({
+      kind: "track",
+      eventType: APP_ERROR,
+      externalUserId: this.userId,
+      ...(!this.userId && this.anonId ? { anonymousId: this.anonId } : {}),
+      properties: {
+        ...automaticProperties(this.appInfo),
+        error_kind: kind,
+        fatal,
+        error_name: name,
+        fingerprint,
+        ...(screenName ? { screen_name: screenName } : {}),
+        session_id: sessionId,
+      },
+      context: this.baseContext(),
+      occurredAt: nowISO(),
+      messageId: uuid(),
+    });
+  }
+
+  /** app_crashed for the previous process, from its run-state flag and last-fatal record. */
+  private async captureCrash(launchedAt: number): Promise<void> {
+    const run = parseRunRecord(await this.launchRun);
+    const fatal = parseRunRecord(await this.launchFatal);
+    if (run) void this.storage.remove(RUN_KEY);
+    if (fatal) void this.storage.remove(FATAL_KEY);
+    if (!this.crashTracking || isDevBuild()) return; // a debug build's red box and reloads are not crashes
+    const record = fatal ?? (run?.running ? run : null);
+    if (!record) return;
+    const crashedAt = fatal?.at;
+    const occurredAt =
+      typeof crashedAt === "number" && crashedAt <= launchedAt && launchedAt - crashedAt < CRASH_MAX_AGE_MS
+        ? crashedAt
+        : launchedAt;
+    this.captureAutomatic(
+      APP_CRASHED,
+      {
+        crash_kind: fatal ? "crash" : "abnormal_exit",
+        detected_by: fatal ? "js_fatal" : "unclean_shutdown",
+        ...(record.app_version ? { crashed_app_version: record.app_version } : {}),
+        ...(record.session_id ? { crashed_session_id: record.session_id } : {}),
+        ...(record.screen ? { crashed_screen_name: record.screen } : {}),
+        foreground: fatal ? !!run?.running : true,
+      },
+      occurredAt,
+    );
+  }
+
+  /** Sets the unclean-shutdown flag: the app is in the foreground. */
+  private markRunning(): void {
+    if (!this.crashTracking) return;
+    this.running = true;
+    this.writeRunState();
+  }
+
+  private writeRunState(): void {
+    const record: RunRecord = {
+      running: true,
+      session_id: this.session.current(),
+      ...(this.lastScreen ? { screen: this.lastScreen } : {}),
+      ...(this.appInfo.version ? { app_version: this.appInfo.version } : {}),
+    };
+    void this.storage.set(RUN_KEY, JSON.stringify(record));
+  }
+
+  private clearRunning(): void {
+    if (!this.running) return;
+    this.running = false;
+    void this.storage.remove(RUN_KEY);
   }
 
   private async captureInstallOrUpdate(launchedAt: number): Promise<void> {
@@ -935,6 +1288,7 @@ export class WhisperrClient implements WhisperrApi {
     if (change?.kind === "installed") {
       this.captureAutomatic(APP_INSTALLED, {}, launchedAt);
     } else if (change?.kind === "updated") {
+      this.firstAfterUpdate = true;
       const previous: Record<string, string> = {};
       if (change.previous.version) previous.previous_version = change.previous.version;
       if (change.previous.build) previous.previous_build = change.previous.build;
@@ -965,7 +1319,7 @@ export class WhisperrClient implements WhisperrApi {
       occurredAt,
       messageId: uuid(),
     });
-    if (this.queue.size >= this.flushAt) void this.flush();
+    if (this.queue.size >= this.flushAt) void this.drainQueue();
   }
 
   private setAnonUsed(used: boolean): void {
@@ -1179,7 +1533,7 @@ export class WhisperrClient implements WhisperrApi {
 
   private startTimer(intervalMs: number): void {
     if (intervalMs <= 0) return;
-    this.flushTimer = setInterval(() => void this.flush(), intervalMs);
+    this.flushTimer = setInterval(() => void this.drainQueue(), intervalMs);
     // Don't keep a Node-like host process alive (tests, RN debugging in Node).
     (this.flushTimer as unknown as { unref?: () => void }).unref?.();
   }
@@ -1405,6 +1759,24 @@ class RememberedIds {
     const remembered = [...this.ids].slice(-MAX_REMEMBERED_PUSH_IDS);
     this.ids = new Set(remembered);
     void after.then(() => this.storage.set(this.key, JSON.stringify(remembered)));
+  }
+}
+
+function parseRunRecord(raw: string | null): RunRecord | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== "object") return null;
+    const str = (v: unknown) => (typeof v === "string" && v ? v : undefined);
+    const record: RunRecord = {};
+    if (parsed.running === true) record.running = true;
+    if (typeof parsed.at === "number" && Number.isFinite(parsed.at)) record.at = parsed.at;
+    if (str(parsed.session_id)) record.session_id = str(parsed.session_id);
+    if (str(parsed.screen)) record.screen = str(parsed.screen);
+    if (str(parsed.app_version)) record.app_version = str(parsed.app_version);
+    return record;
+  } catch {
+    return null; // corrupt payload — discard
   }
 }
 

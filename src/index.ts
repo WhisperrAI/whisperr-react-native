@@ -7,6 +7,7 @@ export * from "./types.js";
 export { WhisperrClient, Whisperr };
 export { MemoryStorage } from "./storage.js";
 export { isExpoPushToken } from "./push.js";
+export { whisperrNavigationTracker, type NavigationTrackerOptions } from "./screens.js";
 export {
   WhisperrProvider,
   useWhisperr,

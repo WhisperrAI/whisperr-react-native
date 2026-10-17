@@ -47,3 +47,29 @@ export const I18nManager = {
 export function __setLocaleIdentifier(id: string | undefined): void {
   localeIdentifier = id;
 }
+
+// ---- Linking ----
+
+type URLListener = (event: { url: string }) => void;
+const urlListeners = new Set<URLListener>();
+let launchURL: string | null = null;
+
+export const Linking = {
+  async getInitialURL(): Promise<string | null> {
+    return launchURL;
+  },
+  addEventListener(_type: string, listener: URLListener) {
+    urlListeners.add(listener);
+    return { remove: () => void urlListeners.delete(listener) };
+  },
+};
+
+/** Test hook: the URL getInitialURL() answers (null = none). */
+export function __setInitialURL(url: string | null): void {
+  launchURL = url;
+}
+
+/** Test hook: the running app is opened with `url`. */
+export function __openURL(url: string): void {
+  for (const listener of [...urlListeners]) listener({ url });
+}

@@ -89,8 +89,10 @@ On by default. Turn them off with `trackAppLifecycleEvents: false`.
 |---|---|---|
 | `app_installed` | First launch of a fresh install | — |
 | `app_updated` | First launch after the app version or build changed | `previous_version`, `previous_build` |
-| `app_opened` | The app comes to the foreground | `cold_start` (true for the first foreground of the process) |
-| `app_backgrounded` | The app goes to the background | `foreground_ms` |
+| `app_opened` | The app comes to the foreground | `cold_start` (true for the first foreground of the process), `launch_source`, and the [launch details](#launch-source) |
+| `app_backgrounded` | The app goes to the background | `foreground_ms`, `session_id`, `screen_count`, `unique_screen_count`, `event_count`, `error_count` |
+| `app_error` | An uncaught JS error, or a `trackError()` call | `error_kind`, `fatal`, `error_name`, `fingerprint`, `screen_name`, `session_id` |
+| `app_crashed` | The first launch after the app ended in the foreground | `crash_kind`, `detected_by`, `crashed_app_version`, `crashed_session_id`, `crashed_screen_name`, `foreground` |
 | `push_received` | You call `trackPushReceived()` for a Whisperr push | `whisperr_message_id`, `foreground`, `source` |
 
 Every event (also your own `track()` calls) carries `app_version`,
@@ -107,6 +109,84 @@ provide them: `app_version`, `app_build`, `platform` and `os_name` (`"ios"`,
   SDK 0.2.x stores the version silently, so it never reports a false install.
 - A launch into the background (headless JS, background fetch) is not an open.
   iOS's brief `inactive` state (Control Center, calls) is not a background.
+
+### Sessions
+
+Every event carries `context.session_id` (`sess_<uuid>`). A new session starts
+on every cold start and after 30 minutes with no event. `app_backgrounded`
+repeats the id and counts what the foreground visit did: `screen_viewed`
+events (`screen_count`), distinct screen names (`unique_screen_count`), your
+own `track()` events (`event_count`; automatic events are not counted), and
+`app_error`s (`error_count`, including the ones the limits below drop).
+`foreground_ms` uses a monotonic clock.
+
+### Launch source
+
+`app_opened` says where the open came from in `launch_source`: `push`,
+`shortcut`, `widget`, `email`, `universal_link`, `deep_link`, or `direct`
+(nothing else detected). When several arrive, that is also the order of
+precedence.
+
+- **Push:** a `trackPushOpened()` call for the tap that opened the app (with
+  `@whisperr/expo` this is automatic). Adds `whisperr_message_id`.
+- **Links:** the SDK reads `Linking.getInitialURL()` and listens for
+  `Linking` `url` events itself. An `https` link is a `universal_link` (with
+  `link_host`), any other scheme a `deep_link`. A link with `wsrc=widget` or
+  `wsrc=shortcut` in its query is a `widget` or `shortcut` open, so give your
+  widget and quick-action URLs that parameter (for example
+  `myapp://home?wsrc=widget`). A link with `wmid=<message id>` is an `email`
+  open. Links add `link_route`, the path with the query and fragment dropped
+  and id-like segments (digits, UUIDs, 16+ characters) replaced by `:id`, and
+  `utm_source`, `utm_medium` and `utm_campaign` when the link has them.
+- `first_after_update: true` marks the first open after `app_updated`.
+
+The tap or URL can arrive just after the app comes to the foreground, so the
+SDK holds `app_opened` for up to 1.5 seconds (`launchSourceWindowMs`). It
+sends it as soon as a source resolves, when the app goes back to the
+background, or when you call `flush()`.
+
+### Errors and crashes
+
+The SDK installs React Native's global JS error handler (`ErrorUtils`) and
+always calls the handler that was there before it, so the red box, Sentry or
+Crashlytics keep working. Each error becomes an `app_error` with its type
+(`error_name`, such as `TypeError`) and a `fingerprint` (a hash of the type and
+the top three function names of the stack). The message, the stack, file paths
+and URLs are never sent. At most one `app_error` per fingerprint and 20 per
+session are sent; they go out with the next batch.
+
+Report errors your code handles with `trackError()`:
+
+```ts
+try {
+  await loadCart();
+} catch (error) {
+  whisperr.trackError(error, { screen: "Cart" }); // error_kind: "handled"
+}
+whisperr.trackError({ name: "HTTP_503" }, { kind: "network" }); // a failed request
+```
+
+`kind` is `handled` (default), `network` or `screen`; `screen` defaults to
+the last `screen_viewed`.
+
+`app_crashed` is sent on the next launch, before its `app_opened`, when the
+app ended while it was in the foreground (`crash_kind: "abnormal_exit"`,
+`detected_by: "unclean_shutdown"`). When the last thing the app did was a
+fatal JS error, it is `crash_kind: "crash"`, `detected_by: "js_fatal"`. The
+SDK has no native code, so it cannot see the cause of a native crash, and a
+process the OS kills in the foreground also counts. Development builds
+(`__DEV__`) never send `app_crashed`.
+
+Unhandled promise rejections are not captured unless you pass
+`captureUnhandledRejections: true` (release builds on Hermes). Hermes keeps
+only one rejection tracker per app and offers no way to pass rejections on, so
+turning it on replaces the tracker of Sentry, Bugsnag or any other tool. Turn
+it on only when no other tool tracks rejections.
+
+`captureErrors: false` turns off the global handler (and the rejection
+tracking). `trackAppLifecycleEvents: false` turns off automatic error capture
+and `app_crashed` as well. `trackError()` works either way. Like every event,
+errors stop after `optOut()`.
 
 ### App version and build
 
@@ -129,13 +209,22 @@ reports Expo Go's own version; that is a development-only effect.
 whisperr.screen("Paywall", { plan: "pro" }); // tracks screen_viewed { screen_name: "Paywall", plan: "pro" }
 ```
 
-Wire it to your navigator once, e.g. React Navigation:
+Wire it to your navigator once. React Navigation:
 
 ```tsx
-<NavigationContainer
-  onStateChange={() => whisperr.screen(navigationRef.getCurrentRoute()?.name)}
->
+import { whisperrNavigationTracker } from "@whisperr/react-native";
+
+const navigationRef = useNavigationContainerRef();
+const onNavigation = useMemo(() => whisperrNavigationTracker(navigationRef), [navigationRef]);
+
+<NavigationContainer ref={navigationRef} onReady={onNavigation} onStateChange={onNavigation}>
 ```
+
+It sends the focused route's name, skips a repeat of the same name, and
+reports to the `Whisperr.init()` client (pass `{ client }` for another one).
+With expo-router, call `useWhisperrScreens()` from `@whisperr/expo` in your
+root layout instead. Screen names should be route names, never titles that
+contain user data.
 
 ## Identify
 
@@ -523,6 +612,9 @@ Whisperr.init({
   maxQueueSize: 1000,         // oldest events drop past this
   maxRetries: 6,
   trackAppLifecycleEvents: true, // app_installed / updated / opened / backgrounded
+  captureErrors: true,        // app_error from uncaught JS errors
+  captureUnhandledRejections: false, // opt-in; replaces another tool's Hermes rejection tracker
+  launchSourceWindowMs: 1500, // how long app_opened waits for its launch source
   appVersion: "2.4.1",        // optional; else read from expo-application / react-native-device-info
   appBuild: "241",
   clientAppId: "com.acme.app", // optional; sent with push tokens as client_app_id

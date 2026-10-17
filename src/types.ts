@@ -249,6 +249,38 @@ export interface WhisperrOptions {
    * `react-native-device-info` when installed.
    */
   clientAppId?: string;
+  /**
+   * Capture uncaught JS errors (`app_error`, through React Native's global
+   * error handler, chained to the one installed before it). Default true.
+   * `trackAppLifecycleEvents: false` also turns it off. `trackError()` works
+   * either way. Error events carry the error's type and a fingerprint, never
+   * its message or stack.
+   */
+  captureErrors?: boolean;
+  /**
+   * Also report unhandled promise rejections as `app_error` (release builds on
+   * Hermes). Default false: Hermes keeps one rejection tracker per app, so
+   * turning this on replaces the one Sentry, Bugsnag or another tool set, and
+   * Whisperr cannot pass rejections on to it. Turn it on only when no other
+   * tool tracks rejections.
+   */
+  captureUnhandledRejections?: boolean;
+  /**
+   * How long `app_opened` waits (ms) for its launch source: a push tap, a
+   * link, or a widget/shortcut link. It goes out sooner when a source
+   * resolves, the app goes to the background, or you call flush(). Default 1500.
+   */
+  launchSourceWindowMs?: number;
+}
+
+/** `error_kind` of an `app_error`. */
+export type WhisperrErrorKind = "js" | "dart" | "native" | "handled" | "network" | "screen";
+
+export interface TrackErrorOptions {
+  /** The screen the error happened on. Default: the last screen_viewed. */
+  screen?: string;
+  /** Default `"handled"`. Use `"network"` for a failed request, `"screen"` for an error screen. */
+  kind?: WhisperrErrorKind;
 }
 
 export interface WhisperrError {
@@ -336,6 +368,18 @@ export interface WhisperrApi {
    * activity.
    */
   trackPushReceived(data: unknown, options?: PushReceivedOptions): WhisperrPushOpen | null;
+  /**
+   * Records an error your code handled (`app_error`, `error_kind: "handled"`
+   * unless you pass `kind`). Only the error's type (`error.name`, or `name`
+   * of a plain object such as `{ name: "HTTP_503" }`) and a fingerprint of
+   * its top stack frames are sent, never the message. At most one per
+   * fingerprint and 20 per session.
+   */
+  trackError(error: unknown, options?: TrackErrorOptions): void;
+  /**
+   * Sends everything queued. Also ends a pending launch-source wait, so a
+   * held `app_opened` goes out first.
+   */
   flush(): Promise<void>;
   reset(): void;
   /** Resumes capture after optOut(). The next setPushToken() registers the token again. */

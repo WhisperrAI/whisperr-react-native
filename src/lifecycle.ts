@@ -3,7 +3,7 @@
  * it and so a defensive try/catch shields exotic runtimes (headless JS tasks,
  * Jest without a preset) where AppState may be unavailable.
  */
-import { AppState, I18nManager, Platform, type AppStateStatus } from "react-native";
+import { AppState, I18nManager, Linking, Platform, type AppStateStatus } from "react-native";
 
 export function currentOS(): string | undefined {
   try {
@@ -73,5 +73,27 @@ export function platformLocaleIdentifier(): string | undefined {
     return typeof id === "string" && id.length > 0 ? id : undefined;
   } catch {
     return undefined;
+  }
+}
+
+/** The URL that launched the app (Linking.getInitialURL), or null. Never rejects. */
+export async function initialURL(): Promise<string | null> {
+  try {
+    const url = await Linking.getInitialURL();
+    return typeof url === "string" && url ? url : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Calls back with each URL the running app is opened with. Returns an unsubscribe. */
+export function onOpenURL(callback: (url: string) => void): () => void {
+  try {
+    const subscription = Linking.addEventListener("url", (event: { url?: unknown }) => {
+      if (typeof event?.url === "string" && event.url) callback(event.url);
+    });
+    return () => subscription?.remove?.();
+  } catch {
+    return () => {};
   }
 }

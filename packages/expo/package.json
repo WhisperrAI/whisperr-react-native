@@ -1,7 +1,7 @@
 {
   "name": "@whisperr/expo",
-  "version": "0.1.1",
-  "description": "Push notifications for Expo apps on Whisperr: config plugin, permission + push token registration, notification opens with deep links, and foreground receipts.",
+  "version": "0.2.0",
+  "description": "Push notifications for Expo apps on Whisperr: config plugin, permission + push token registration, notification opens with deep links, and foreground receipts, and expo-router screen tracking.",
   "license": "MIT",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
@@ -39,7 +39,8 @@
     "expo-constants": "*",
     "expo-notifications": "*",
     "react": ">=18",
-    "react-native": ">=0.76"
+    "react-native": ">=0.76",
+    "expo-router": "*"
   },
   "devDependencies": {
     "@types/react": "^19.3.0",
@@ -71,5 +72,10 @@
     "url": "git+https://github.com/WhisperrAI/whisperr-react-native.git",
     "directory": "packages/expo"
   },
-  "homepage": "https://github.com/WhisperrAI/whisperr-react-native/tree/main/packages/expo#readme"
+  "homepage": "https://github.com/WhisperrAI/whisperr-react-native/tree/main/packages/expo#readme",
+  "peerDependenciesMeta": {
+    "expo-router": {
+      "optional": true
+    }
+  }
 }

@@ -235,6 +235,30 @@ Pass `onOpen` to act on each tap directly. Outside React, use
 To show notifications while the app is in the foreground, set a handler with
 `Notifications.setNotificationHandler`. See the expo-notifications docs.
 
+The tap that opens the app also sets `launch_source: "push"` (and
+`whisperr_message_id`) on that launch's `app_opened`, with
+`@whisperr/react-native` 0.7.0 or later.
+
+## Screens with expo-router
+
+```tsx
+// app/_layout.tsx
+import { Stack } from "expo-router";
+import { useWhisperrScreens } from "@whisperr/expo";
+
+export default function RootLayout() {
+  useWhisperrScreens();
+  return <Stack />;
+}
+```
+
+It sends `screen_viewed` each time the route changes, with the route template
+as `screen_name`: `app/(tabs)/lesson/[id].tsx` is `/lesson/[id]`, never
+`/lesson/42`. Groups such as `(tabs)` are left out, and a repeat of the same
+template is skipped. `expo-router` is an optional peer: without it the hook
+does nothing. For React Navigation, use `whisperrNavigationTracker()` from
+`@whisperr/react-native`.
+
 ## Expo Go
 
 - Events work in Expo Go.
