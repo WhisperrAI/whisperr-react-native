@@ -141,10 +141,6 @@ export function errorName(error: unknown): string {
   return clean || "Error";
 }
 
-const V8_FRAME = /^\s*at\s+(?:(?:new|async)\s+)?(.*?)\s+\(/;
-const V8_ANON = /^\s*at\s+\S/;
-const JSC_FRAME = /^\s*([^@\s]*)@/;
-
 /**
  * The function names of the top three stack frames (Hermes/V8 `at fn (…)`
  * and JSC `fn@…` formats). Paths, line and column numbers are dropped; an
@@ -153,15 +149,22 @@ const JSC_FRAME = /^\s*([^@\s]*)@/;
 export function stackFrames(stack: unknown, limit = 3): string[] {
   if (typeof stack !== "string") return [];
   const frames: string[] = [];
-  for (const line of stack.split("\n")) {
-    let name: string | undefined;
-    const v8 = V8_FRAME.exec(line);
-    if (v8) name = v8[1] ?? "";
-    else if (V8_ANON.test(line)) name = "";
-    else {
-      const jsc = JSC_FRAME.exec(line);
-      if (!jsc) continue;
-      name = jsc[1] ?? "";
+  // Plain string scans, no backtracking regex: stacks can be long and odd.
+  for (const raw of stack.split("\n")) {
+    const line = raw.trim();
+    let name: string;
+    if (line.startsWith("at ")) {
+      // Hermes / V8: `at fn (file:1:2)`, `at new Foo (…)`, `at async fn (…)`, or `at file:1:2`.
+      let rest = line.slice(3).trimStart();
+      for (const prefix of ["new ", "async "]) if (rest.startsWith(prefix)) rest = rest.slice(prefix.length).trimStart();
+      const paren = rest.indexOf(" (");
+      name = paren > 0 ? rest.slice(0, paren).trim() : "";
+    } else {
+      // JSC: `fn@file:1:2` or `@file:1:2`.
+      const at = line.indexOf("@");
+      if (at < 0) continue;
+      name = line.slice(0, at);
+      if (/\s/.test(name)) continue;
     }
     // `Object.loadCart` (V8) and `loadCart` (Hermes) are the same function.
     const short = name.split(".").pop() ?? "";
