@@ -22,7 +22,10 @@ and events, and on
 npx expo install @whisperr/expo @whisperr/react-native expo-notifications expo-constants expo-application @react-native-async-storage/async-storage
 ```
 
-Add the plugin to the app config:
+With an `app.json`, `npx expo install @whisperr/expo` adds `"@whisperr/expo"` to
+`plugins` by itself, because the package ships a config plugin. With an
+`app.config.js` or `app.config.ts`, add it yourself. To set options, use this
+form:
 
 ```json
 {
