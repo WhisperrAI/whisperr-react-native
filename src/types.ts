@@ -251,12 +251,20 @@ export interface WhisperrOptions {
   clientAppId?: string;
   /**
    * Capture uncaught JS errors (`app_error`, through React Native's global
-   * error handler, chained to the one installed before it) and crashes
-   * (`app_crashed` on the next launch). Default true. `trackError()` works
+   * error handler, chained to the one installed before it). Default true.
+   * `trackAppLifecycleEvents: false` also turns it off. `trackError()` works
    * either way. Error events carry the error's type and a fingerprint, never
    * its message or stack.
    */
   captureErrors?: boolean;
+  /**
+   * Also report unhandled promise rejections as `app_error` (release builds on
+   * Hermes). Default false: Hermes keeps one rejection tracker per app, so
+   * turning this on replaces the one Sentry, Bugsnag or another tool set, and
+   * Whisperr cannot pass rejections on to it. Turn it on only when no other
+   * tool tracks rejections.
+   */
+  captureUnhandledRejections?: boolean;
   /**
    * How long `app_opened` waits (ms) for its launch source: a push tap, a
    * link, or a widget/shortcut link. It goes out sooner when a source

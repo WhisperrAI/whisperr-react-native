@@ -1,7 +1,7 @@
 /**
  * Automatic error capture: React Native's global JS error handler
- * (`ErrorUtils`) and, in release builds on Hermes, unhandled promise
- * rejections. Every client with `captureErrors` on is a sink. The handler
+ * (`ErrorUtils`) and, opt-in, Hermes unhandled promise rejections in release
+ * builds. Every client with `captureErrors` on is a sink. The global handler
  * always calls the handler that was installed before it (React Native's red
  * box, Sentry, Crashlytics), even when a sink throws.
  */
@@ -34,11 +34,15 @@ function dispatch(error: unknown, fatal: boolean): void {
   }
 }
 
-/** Starts sending uncaught errors to `sink`. Returns a stop function. */
-export function addErrorSink(sink: ErrorSink): () => void {
+/**
+ * Starts sending uncaught errors to `sink`. `rejections` also enables Hermes
+ * unhandled-rejection tracking (opt-in: see enableRejectionTracking).
+ * Returns a stop function.
+ */
+export function addErrorSink(sink: ErrorSink, options: { rejections?: boolean } = {}): () => void {
   sinks.add(sink);
   installGlobalHandler();
-  enableRejectionTracking();
+  if (options.rejections) enableRejectionTracking();
   return () => void sinks.delete(sink);
 }
 
@@ -69,8 +73,10 @@ function installGlobalHandler(): void {
 
 /**
  * Hermes reports unhandled rejections only to a tracker someone enabled.
- * React Native enables its own in development (LogBox), so this one runs in
- * release builds only, and once per JS context.
+ * There is no getter, so enabling one replaces any other (Sentry, Bugsnag)
+ * and cannot chain to it: the app must opt in. React Native enables its own
+ * in development (LogBox), so this one runs in release builds only, once per
+ * JS context.
  */
 function enableRejectionTracking(): void {
   if (rejectionTracking || isDevBuild()) return;

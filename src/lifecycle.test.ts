@@ -15,6 +15,9 @@ vi.mock("./device.js", async (importOriginal) => ({
 let captured: Array<{ path: string; body: any }> = [];
 
 beforeEach(() => {
+  // Relaunches here end in the foreground; a debug build sends no app_crashed.
+  // Crash reporting has its own tests (signals.test.ts).
+  (globalThis as { __DEV__?: boolean }).__DEV__ = true;
   captured = [];
   device.traits = { timezone: "Europe/Berlin", locale: "de-DE" };
   vi.stubGlobal(
@@ -27,6 +30,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  delete (globalThis as { __DEV__?: boolean }).__DEV__;
   vi.unstubAllGlobals();
   vi.useRealTimers();
   AppState.currentState = "active";
@@ -40,8 +44,6 @@ function makeClient(overrides: Partial<WhisperrOptions> = {}): WhisperrClient {
     maxRetries: 0,
     appVersion: "2.4.1",
     appBuild: "241",
-    // Relaunches here end in the foreground; crash reporting has its own tests (signals.test.ts).
-    captureErrors: false,
     ...overrides,
   });
 }

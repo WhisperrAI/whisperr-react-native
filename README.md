@@ -149,8 +149,7 @@ background, or when you call `flush()`.
 
 The SDK installs React Native's global JS error handler (`ErrorUtils`) and
 always calls the handler that was there before it, so the red box, Sentry or
-Crashlytics keep working. In release builds on Hermes it also reports
-unhandled promise rejections. Each error becomes an `app_error` with its type
+Crashlytics keep working. Each error becomes an `app_error` with its type
 (`error_name`, such as `TypeError`) and a `fingerprint` (a hash of the type and
 the top three function names of the stack). The message, the stack, file paths
 and URLs are never sent. At most one `app_error` per fingerprint and 20 per
@@ -178,9 +177,16 @@ SDK has no native code, so it cannot see the cause of a native crash, and a
 process the OS kills in the foreground also counts. Development builds
 (`__DEV__`) never send `app_crashed`.
 
-`captureErrors: false` turns off the global handler, the rejection tracking
-and `app_crashed`. `trackError()` still works. Like every event, errors stop
-after `optOut()`.
+Unhandled promise rejections are not captured unless you pass
+`captureUnhandledRejections: true` (release builds on Hermes). Hermes keeps
+only one rejection tracker per app and offers no way to pass rejections on, so
+turning it on replaces the tracker of Sentry, Bugsnag or any other tool. Turn
+it on only when no other tool tracks rejections.
+
+`captureErrors: false` turns off the global handler (and the rejection
+tracking). `trackAppLifecycleEvents: false` turns off automatic error capture
+and `app_crashed` as well. `trackError()` works either way. Like every event,
+errors stop after `optOut()`.
 
 ### App version and build
 
@@ -606,7 +612,8 @@ Whisperr.init({
   maxQueueSize: 1000,         // oldest events drop past this
   maxRetries: 6,
   trackAppLifecycleEvents: true, // app_installed / updated / opened / backgrounded
-  captureErrors: true,        // app_error from uncaught JS errors, app_crashed
+  captureErrors: true,        // app_error from uncaught JS errors
+  captureUnhandledRejections: false, // opt-in; replaces another tool's Hermes rejection tracker
   launchSourceWindowMs: 1500, // how long app_opened waits for its launch source
   appVersion: "2.4.1",        // optional; else read from expo-application / react-native-device-info
   appBuild: "241",

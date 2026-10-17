@@ -19,14 +19,16 @@ backend that knows `app_error` and `app_crashed`.
   `trackPushOpened()`. `app_opened` waits up to 1.5 s for the source
   (`launchSourceWindowMs`), and `flush()` sends it at once.
 - **`app_error`** (new): uncaught JS errors through `ErrorUtils` (chained to
-  the previous handler) and, in release builds on Hermes, unhandled promise
-  rejections. New `trackError(error, { screen, kind })` for handled errors.
+  the previous handler). Unhandled promise rejections (release builds on
+  Hermes) are opt-in with `captureUnhandledRejections: true`, because that
+  replaces any other tool's rejection tracker. New `trackError(error, { screen, kind })` for handled errors.
   Only the error type and a fingerprint are sent. One per fingerprint and 20
   per session.
 - **`app_crashed`** (new): on the next launch, before `app_opened`, when the
   app ended in the foreground; `crash` / `js_fatal` after a fatal JS error.
   Never in development builds.
-- **`captureErrors: false`** turns automatic error and crash capture off.
+- **`captureErrors: false`** turns automatic error capture off;
+  `trackAppLifecycleEvents: false` turns it and `app_crashed` off.
 - **`whisperrNavigationTracker(ref)`** sends `screen_viewed` from React
   Navigation, without a dependency on it.
 

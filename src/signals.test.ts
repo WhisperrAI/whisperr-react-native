@@ -371,17 +371,35 @@ describe("app_error", () => {
     await w.close();
   });
 
-  it("enables the Hermes rejection tracker in release builds only", async () => {
+  it("trackAppLifecycleEvents: false stops automatic capture; trackError still sends", async () => {
+    const before = globalHandler;
+    const w = makeClient({ trackAppLifecycleEvents: false });
+    expect(globalHandler).toBe(before);
+    w.trackError(new Error("x"));
+    await settle(w);
+    expect(types()).toEqual(["app_error"]);
+    await w.close();
+  });
+
+  it("never touches the Hermes rejection tracker unless asked", async () => {
+    const enable = vi.fn();
+    (globalThis as { HermesInternal?: unknown }).HermesInternal = { enablePromiseRejectionTracker: enable };
+    const w = makeClient();
+    expect(enable).not.toHaveBeenCalled();
+    await w.close();
+  });
+
+  it("captureUnhandledRejections enables the Hermes tracker in release builds only", async () => {
     const enable = vi.fn();
     (globalThis as { HermesInternal?: unknown }).HermesInternal = { enablePromiseRejectionTracker: enable };
     (globalThis as { __DEV__?: boolean }).__DEV__ = true;
-    const dev = makeClient();
+    const dev = makeClient({ captureUnhandledRejections: true });
     expect(enable).not.toHaveBeenCalled();
     await dev.close();
     __resetErrorCapture();
 
     delete (globalThis as { __DEV__?: boolean }).__DEV__;
-    const w = makeClient();
+    const w = makeClient({ captureUnhandledRejections: true });
     expect(enable).toHaveBeenCalledTimes(1);
     await settle(w);
     enable.mock.calls[0]![0].onUnhandled(1, errorWithStack("SyncError", ["sync"]));
@@ -443,6 +461,27 @@ describe("app_crashed", () => {
     await settle(second);
     expect(named("app_crashed")).toHaveLength(0);
     await second.close();
+  });
+
+  it("captureErrors: false still reports an unclean shutdown", async () => {
+    const storage = new MemoryStorage();
+    const first = makeClient({ storage, captureErrors: false });
+    await settle(first);
+    await first.close();
+    captured = [];
+    const second = makeClient({ storage, captureErrors: false });
+    await settle(second);
+    expect(named("app_crashed")[0].properties.detected_by).toBe("unclean_shutdown");
+    await second.close();
+  });
+
+  it("a fatal error inside the launch window sends the held app_opened first", async () => {
+    const w = makeClient({ launchSourceWindowMs: 60_000 });
+    await launched(w);
+    globalHandler(errorWithStack("BootError", ["boot"]), true);
+    await (w as unknown as { drainQueue: () => Promise<void> }).drainQueue();
+    expect(types()).toEqual(["app_opened", "app_error"]);
+    await w.close();
   });
 
   it("a debug build never sends app_crashed, and clears the flag", async () => {

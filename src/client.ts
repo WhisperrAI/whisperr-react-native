@@ -266,6 +266,8 @@ export class WhisperrClient implements WhisperrApi {
   private foregroundSince: number | null = null;
   /** WhisperrOptions.captureErrors. */
   private readonly captureErrors: boolean;
+  /** WhisperrOptions.captureUnhandledRejections (only with captureErrors). */
+  private readonly captureRejections: boolean;
   /** app_crashed needs the foreground flag the lifecycle writes. */
   private readonly crashTracking: boolean;
   private readonly launchWindowMs: number;
@@ -311,8 +313,11 @@ export class WhisperrClient implements WhisperrApi {
     this.disabled = !!options.disabled;
     this.autocapture = !this.disabled && (options.trackAppLifecycleEvents ?? true);
     this.flushOnBackground = options.flushOnAppBackground ?? true;
-    this.captureErrors = !this.disabled && (options.captureErrors ?? true);
-    this.crashTracking = this.autocapture && this.captureErrors;
+    // Automatic error capture is an automatic event: trackAppLifecycleEvents: false stops it too.
+    this.captureErrors = this.autocapture && (options.captureErrors ?? true);
+    this.captureRejections = this.captureErrors && options.captureUnhandledRejections === true;
+    // The unclean-shutdown flag follows the automatic-events switch only.
+    this.crashTracking = this.autocapture;
     this.launchWindowMs = Math.max(0, options.launchSourceWindowMs ?? DEFAULT_LAUNCH_WINDOW_MS);
     // Manual screen(), push_opened and push_permission_changed carry these
     // too, so they resolve even with the automatic events off.
@@ -356,7 +361,10 @@ export class WhisperrClient implements WhisperrApi {
         this.removeLinking = onOpenURL((url) => this.noteLaunchURL(url));
       }
       if (this.captureErrors) {
-        this.removeErrorSink = addErrorSink({ captureUncaught: (error, fatal) => this.captureUncaught(error, fatal) });
+        this.removeErrorSink = addErrorSink(
+          { captureUncaught: (error, fatal) => this.captureUncaught(error, fatal) },
+          { rejections: this.captureRejections },
+        );
       }
       if (this.autocapture || this.flushOnBackground) {
         this.removeLifecycle = onAppStateChange((state) => this.handleAppState(state));
@@ -1158,6 +1166,8 @@ export class WhisperrClient implements WhisperrApi {
   /** From the global handler: an uncaught JS error (`fatal`: the app is about to terminate). */
   private captureUncaught(error: unknown, fatal: boolean): void {
     if (this.closed) return;
+    // The app is about to terminate: an app_opened still waiting for its source goes out now.
+    if (fatal) this.finishOpen();
     if (fatal && this.crashTracking) {
       // Best effort: the process may end before the write lands; the run-state flag still reports it.
       const record: RunRecord = {
