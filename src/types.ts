@@ -271,6 +271,34 @@ export interface WhisperrOptions {
    * resolves, the app goes to the background, or you call flush(). Default 1500.
    */
   launchSourceWindowMs?: number;
+  /**
+   * Report the OS notification permission by itself (`push_permission_changed`),
+   * so the app does not have to call setPushPermission(). Default true. The
+   * SDK reads it, without a prompt, after start, each time the app becomes
+   * active (which includes the moment the app's own permission prompt
+   * closes), and after reset(). It reads through `pushPermissionReader`, else
+   * `expo-notifications` or `@react-native-firebase/messaging` when the app
+   * has one; with neither it reads nothing.
+   *
+   * An automatic read reports only when the OS answer differs from the last
+   * one the SDK read, or when nothing was sent yet (a new install, after
+   * reset()). So a status the app sets with setPushPermission() stands until
+   * the OS setting itself changes. Nothing is read while opted out. Set false
+   * to report only through setPushPermission().
+   */
+  automaticPushPermission?: boolean;
+  /**
+   * Reads the OS notification permission for `automaticPushPermission` and
+   * refreshPushPermission(), for apps that use another package (for example
+   * `react-native-permissions` or `@notifee/react-native`). Return null or
+   * undefined when it cannot tell. Default: `expo-notifications`, then
+   * `@react-native-firebase/messaging`.
+   */
+  pushPermissionReader?: () =>
+    | Promise<PushPermissionStatus | null | undefined>
+    | PushPermissionStatus
+    | null
+    | undefined;
 }
 
 /** `error_kind` of an `app_error`. */
@@ -333,6 +361,9 @@ export interface WhisperrApi {
    * identify() it goes out under the anonymous handle. `denied` also opts out
    * the push token this client registered, so the engine stops choosing push
    * for this device; `granted` / `provisional` registers it again.
+   *
+   * With `automaticPushPermission` (default) the SDK reports the OS value by
+   * itself; a status set here stands until the OS setting changes.
    */
   setPushPermission(status: PushPermissionStatus): void;
   /**
@@ -343,6 +374,15 @@ export interface WhisperrApi {
    * status, or null when neither package is installed. Never throws.
    */
   requestPushAuthorization(options?: PushAuthorizationOptions): Promise<PushPermissionStatus | null>;
+  /**
+   * Reads the OS notification permission now (no prompt) and reports it
+   * through setPushPermission(). The SDK already does this after start and
+   * each time the app becomes active (`automaticPushPermission`); call it
+   * right after your own permission prompt if you want it at once. Resolves
+   * to the status read, or null when no reader is available, while opted out,
+   * or when the read fails. Never throws.
+   */
+  refreshPushPermission(): Promise<PushPermissionStatus | null>;
   track(eventType: string, properties?: Record<string, unknown>, context?: Record<string, unknown>): void;
   /** Tracks `screen_viewed` with `{ screen_name: name }`. Wire it to your navigator. */
   screen(name: string, properties?: Record<string, unknown>): void;

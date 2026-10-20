@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- **Automatic notification permission** (`automaticPushPermission`, default
+  true): the SDK reads the OS permission without a prompt after start, each
+  time the app becomes active (which covers the app's own permission prompt
+  closing), and after `reset()`, and sends `push_permission_changed` when it
+  changed. It reads through `expo-notifications` (`getPermissionsAsync()`) or
+  `@react-native-firebase/messaging` (`hasPermission()`) when the app has
+  one, or a `pushPermissionReader` you pass. No new dependency.
+- `setPushPermission()` keeps working and wins: an automatic read reports
+  only when the OS answer differs from the last read (stored on the device),
+  or when nothing was sent yet (new install, after `reset()`). A status you
+  set stands until the OS setting changes.
+- New `refreshPushPermission()`: read the OS permission now and report it.
+- Nothing is read while opted out. `automaticPushPermission: false` reports
+  only what the app passes to `setPushPermission()`.
+
 ## 0.7.0
 
 Engagement signals (whisperr-spec, signals v3). Send these to a Whisperr
