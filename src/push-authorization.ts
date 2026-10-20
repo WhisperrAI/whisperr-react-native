@@ -1,8 +1,9 @@
 /**
- * requestPushAuthorization(): the OS notification prompt through a package the
- * app already has — `expo-notifications`, then
- * `@react-native-firebase/messaging`. Neither is a dependency; the SDK stays
- * pure JS. The `require` calls sit directly inside `try` (see app-info.ts).
+ * requestPushAuthorization() and the automatic permission read: the OS
+ * notification permission through a package the app already has —
+ * `expo-notifications`, then `@react-native-firebase/messaging`. Neither is a
+ * dependency; the SDK stays pure JS. The `require` calls sit directly inside
+ * `try` (see app-info.ts).
  */
 import type { PushAuthorizationOptions, PushPermissionStatus } from "./types.js";
 
@@ -50,6 +51,88 @@ export async function requestPermission(
     } catch {
       return undefined;
     }
+  }
+  return undefined;
+}
+
+export type PermissionReader = () => Promise<PushPermissionStatus | undefined>;
+
+/**
+ * Readers for the supported optional peers, in preference order. They read
+ * the permission without a prompt: expo-notifications `getPermissionsAsync()`
+ * (iOS authorization status incl. provisional and ephemeral; Android
+ * `areNotificationsEnabled` and, on 13+, POST_NOTIFICATIONS), Firebase
+ * `hasPermission()`.
+ */
+export const PERMISSION_READERS: ReadonlyArray<() => PermissionReader | undefined> = [
+  () => {
+    let mod: unknown;
+    try {
+      mod = require("expo-notifications");
+    } catch {
+      return undefined;
+    }
+    return expoPermissionReader(mod);
+  },
+  () => {
+    let mod: unknown;
+    try {
+      mod = require("@react-native-firebase/messaging");
+    } catch {
+      return undefined;
+    }
+    return firebasePermissionReader(mod);
+  },
+];
+
+/** Reads with the first installed reader. Undefined when none is installed or the read fails. */
+export async function readPermission(
+  readers: ReadonlyArray<() => PermissionReader | undefined> = PERMISSION_READERS,
+): Promise<PushPermissionStatus | undefined> {
+  for (const load of readers) {
+    let read: PermissionReader | undefined;
+    try {
+      read = load();
+    } catch {
+      read = undefined;
+    }
+    if (!read) continue;
+    try {
+      return await read();
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+/** expo-notifications `getPermissionsAsync()` (no prompt). */
+export function expoPermissionReader(mod: unknown): PermissionReader | undefined {
+  const m = mod as { getPermissionsAsync?: () => Promise<unknown> } | null;
+  if (!m || typeof m.getPermissionsAsync !== "function") return undefined;
+  const getPermissionsAsync = m.getPermissionsAsync;
+  return async () => expoStatus(await getPermissionsAsync());
+}
+
+/** @react-native-firebase/messaging `hasPermission()` (no prompt): the modular API, else the namespaced `messaging()`. */
+export function firebasePermissionReader(mod: unknown): PermissionReader | undefined {
+  const m = mod as {
+    getMessaging?: () => unknown;
+    hasPermission?: (messaging: unknown) => Promise<unknown>;
+    default?: () => { hasPermission?: () => Promise<unknown> };
+  } | null;
+  if (!m) return undefined;
+  if (typeof m.getMessaging === "function" && typeof m.hasPermission === "function") {
+    const { getMessaging, hasPermission } = m;
+    return async () => firebaseStatus(await hasPermission(getMessaging()));
+  }
+  if (typeof m.default === "function") {
+    const factory = m.default;
+    return async () => {
+      const instance = factory();
+      if (typeof instance?.hasPermission !== "function") return undefined;
+      return firebaseStatus(await instance.hasPermission());
+    };
   }
   return undefined;
 }

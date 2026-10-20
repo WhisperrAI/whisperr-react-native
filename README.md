@@ -381,11 +381,33 @@ when you know it:
 
 ### Permission
 
-Report the OS notification permission on every launch and every return to
-the foreground. A repeated status is a no-op.
+The SDK reports the OS notification permission by itself
+(`automaticPushPermission`, on by default). It reads it, without a prompt,
+after start, each time the app becomes active (this includes the moment your
+own permission prompt closes: iOS goes inactive → active, Android background
+→ active), and after `reset()`. It reads through the package the app already
+has:
+
+- `expo-notifications` (`getPermissionsAsync()`): the iOS authorization
+  status, including provisional and ephemeral (App Clip, reported as
+  `granted`); on Android, whether notifications are enabled, which on 13+
+  includes `POST_NOTIFICATIONS`;
+- else `@react-native-firebase/messaging` (`hasPermission()`);
+- or your own reader: `pushPermissionReader: async () => status` (for
+  example from `react-native-permissions` or `@notifee/react-native`).
+
+With none of them the SDK has no way to read the permission (it has no native
+code): report it yourself with `setPushPermission()`.
+
+An automatic read reports only when the OS answer changed since the last
+read, or when nothing was sent yet (a new install, after `reset()`). So
+`setPushPermission()` still works and wins: a status you set stands until the
+OS setting itself changes.
 
 ```ts
 whisperr.setPushPermission("granted"); // "granted" | "provisional" | "denied" | "undetermined"
+await whisperr.refreshPushPermission(); // read the OS now and report it (no prompt)
+Whisperr.init({ apiKey, storage, automaticPushPermission: false }); // report only by hand
 ```
 
 To show the OS prompt, call `requestPushAuthorization()`. It uses
@@ -454,7 +476,6 @@ token to an FCM token for you).
 
 ```tsx
 import messaging from "@react-native-firebase/messaging";
-import { AppState } from "react-native";
 import type { PushPermissionStatus } from "@whisperr/react-native";
 
 // messaging.AuthorizationStatus: -1 NOT_DETERMINED, 0 DENIED, 1 AUTHORIZED, 2 PROVISIONAL, 3 EPHEMERAL
@@ -474,14 +495,9 @@ async function registerPush() {
 useEffect(() => {
   void registerPush();
   const unsubscribe = messaging().onTokenRefresh((token) => whisperr.setPushToken({ token, kind: "fcm" }));
-  // Users change the permission in Settings: check again on each foreground.
-  const sub = AppState.addEventListener("change", async (state) => {
-    if (state === "active") whisperr.setPushPermission(toStatus(await messaging().hasPermission()));
-  });
-  return () => {
-    unsubscribe();
-    sub.remove();
-  };
+  // Changes made in Settings are picked up by the SDK on each foreground
+  // (automaticPushPermission reads messaging().hasPermission()).
+  return unsubscribe;
 }, []);
 ```
 
@@ -615,6 +631,8 @@ Whisperr.init({
   captureErrors: true,        // app_error from uncaught JS errors
   captureUnhandledRejections: false, // opt-in; replaces another tool's Hermes rejection tracker
   launchSourceWindowMs: 1500, // how long app_opened waits for its launch source
+  automaticPushPermission: true, // report the OS notification permission by itself
+  pushPermissionReader: undefined, // optional; default expo-notifications, then Firebase messaging
   appVersion: "2.4.1",        // optional; else read from expo-application / react-native-device-info
   appBuild: "241",
   clientAppId: "com.acme.app", // optional; sent with push tokens as client_app_id

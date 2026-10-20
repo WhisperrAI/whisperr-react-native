@@ -4,10 +4,13 @@ import { fromDeviceInfo, fromExpoApplication, resolveAppInfo } from "./app-info.
 import { normalizeAppLanguage } from "./client.js";
 import { asStorage, loadDefaultStorage } from "./default-storage.js";
 import {
+  expoPermissionReader,
   expoStatus,
+  firebasePermissionReader,
   firebaseStatus,
   fromExpoNotifications,
   fromFirebaseMessaging,
+  readPermission,
   requestPermission,
 } from "./push-authorization.js";
 import { easProjectId, firebaseProjectId } from "./push-environment.js";
@@ -64,6 +67,47 @@ describe("requestPushAuthorization peers", () => {
     ).resolves.toBeUndefined();
     await expect(requestPermission({}, [])).resolves.toBeUndefined();
     await expect(requestPermission({})).resolves.toBeUndefined(); // no peer in this runtime
+  });
+});
+
+describe("automatic permission read peers (no prompt)", () => {
+  it("expo-notifications: getPermissionsAsync with the iOS status (provisional, ephemeral) or Android granted", async () => {
+    await expect(expoPermissionReader({ getPermissionsAsync: async () => ({ ios: { status: 3 } }) })!()).resolves.toBe(
+      "provisional",
+    );
+    await expect(expoPermissionReader({ getPermissionsAsync: async () => ({ ios: { status: 4 } }) })!()).resolves.toBe(
+      "granted",
+    );
+    await expect(
+      expoPermissionReader({ getPermissionsAsync: async () => ({ granted: false, status: "denied" }) })!(),
+    ).resolves.toBe("denied");
+    await expect(
+      expoPermissionReader({ getPermissionsAsync: async () => ({ granted: false, status: "undetermined" }) })!(),
+    ).resolves.toBe("undetermined");
+    expect(expoPermissionReader({ requestPermissionsAsync: async () => ({}) })).toBeUndefined();
+  });
+
+  it("Firebase: hasPermission, modular or namespaced", async () => {
+    await expect(
+      firebasePermissionReader({ getMessaging: () => ({}), hasPermission: async () => 2 })!(),
+    ).resolves.toBe("provisional");
+    await expect(firebasePermissionReader({ default: () => ({ hasPermission: async () => 0 }) })!()).resolves.toBe(
+      "denied",
+    );
+    await expect(firebasePermissionReader({ default: () => ({}) })!()).resolves.toBeUndefined();
+    expect(firebasePermissionReader(null)).toBeUndefined();
+  });
+
+  it("the first installed peer answers; a throwing one resolves undefined", async () => {
+    await expect(readPermission([() => undefined, () => async () => "denied"])).resolves.toBe("denied");
+    await expect(
+      readPermission([
+        () => async () => {
+          throw new Error("read failed");
+        },
+      ]),
+    ).resolves.toBeUndefined();
+    await expect(readPermission()).resolves.toBeUndefined(); // no peer in this runtime
   });
 });
 

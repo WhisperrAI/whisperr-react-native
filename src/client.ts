@@ -27,7 +27,7 @@ import {
   onOpenURL,
   type AppStateStatus,
 } from "./lifecycle.js";
-import { requestPermission } from "./push-authorization.js";
+import { readPermission, requestPermission } from "./push-authorization.js";
 import { detectPushEnvironment, type PushEnvironmentInfo } from "./push-environment.js";
 import {
   isPushPermissionStatus,
@@ -93,6 +93,8 @@ const APP_VERSION_KEY = "whisperr.app_version";
 const PUSH_OPENED_KEY = "whisperr.push_opened";
 /** The device's notification permission (a PermissionRecord). */
 const PERMISSION_KEY = "whisperr.push_permission";
+/** The notification permission the SDK last read from the OS (automaticPushPermission). */
+const PERMISSION_OS_KEY = "whisperr.push_permission_os";
 /** whisperr_message_ids already reported as push_received (most recent last). */
 const PUSH_RECEIVED_KEY = "whisperr.push_received";
 /** The language the user picked in the app (setAppLanguage). */
@@ -242,6 +244,14 @@ export class WhisperrClient implements WhisperrApi {
   private lastPush: PushPair | null = null;
   /** The device's notification permission; null until the app reports one. */
   private permission: PermissionRecord | null = null;
+  /** Read the OS permission by itself (automaticPushPermission). */
+  private readonly autoPermission: boolean;
+  private readonly permissionReader: WhisperrOptions["pushPermissionReader"];
+  /** The permission last read from the OS (persisted as PERMISSION_OS_KEY); null before the first read. */
+  private osPermission: PushPermissionStatus | null = null;
+  /** The automatic read in flight, and whether another was asked for meanwhile. */
+  private permissionRead: Promise<void> | null = null;
+  private permissionReread = false;
   /** optOut() ran (persisted as OPTOUT_KEY). Only queued push opt-outs are sent. */
   private optedOut = false;
   private closed = false;
@@ -319,6 +329,8 @@ export class WhisperrClient implements WhisperrApi {
     // The unclean-shutdown flag follows the automatic-events switch only.
     this.crashTracking = this.autocapture;
     this.launchWindowMs = Math.max(0, options.launchSourceWindowMs ?? DEFAULT_LAUNCH_WINDOW_MS);
+    this.autoPermission = !this.disabled && (options.automaticPushPermission ?? true);
+    this.permissionReader = options.pushPermissionReader;
     // Manual screen(), push_opened and push_permission_changed carry these
     // too, so they resolve even with the automatic events off.
     this.appInfo = this.disabled ? {} : resolveAppInfo({ version: options.appVersion, build: options.appBuild });
@@ -366,8 +378,14 @@ export class WhisperrClient implements WhisperrApi {
           { rejections: this.captureRejections },
         );
       }
-      if (this.autocapture || this.flushOnBackground) {
+      if (this.autocapture || this.flushOnBackground || this.autoPermission) {
         this.removeLifecycle = onAppStateChange((state) => this.handleAppState(state));
+      }
+      // The permission at start, unless the process launched in the
+      // background (headless JS): then the first move to "active" reads it.
+      const launchState = currentAppState();
+      if (launchState === undefined || launchState === "active" || launchState === "unknown") {
+        this.autoReadPermission();
       }
       // Drain anything left over from a previous launch (while opted out:
       // a push opt-out that did not reach the server yet).
@@ -493,7 +511,27 @@ export class WhisperrClient implements WhisperrApi {
       );
       return null;
     }
+    await this.initPromise;
+    // The answer is what the OS now says.
+    if (!this.muted && !this.closed) this.setOSPermission(status);
     this.setPushPermission(status);
+    return status;
+  }
+
+  async refreshPushPermission(): Promise<PushPermissionStatus | null> {
+    if (this.disabled || this.closed) return null;
+    await this.initPromise;
+    if (this.muted || this.closed) return null;
+    const status = await this.readOSPermission();
+    if (!status) {
+      this.log(
+        "refreshPushPermission(): could not read the permission — install expo-notifications or @react-native-firebase/messaging, pass pushPermissionReader, or call setPushPermission() yourself",
+      );
+      return null;
+    }
+    if (this.muted || this.closed) return null;
+    this.setOSPermission(status);
+    this.applyPermission(status);
     return status;
   }
 
@@ -648,6 +686,8 @@ export class WhisperrClient implements WhisperrApi {
       if (reg) this.registerPushToken(reg);
     }
     if (last) void this.drainQueue();
+    // The next user's report: reset() cleared the status sent, so the read sends it.
+    this.autoReadPermission();
   }
 
   optIn(): void {
@@ -738,6 +778,8 @@ export class WhisperrClient implements WhisperrApi {
     // The permission is reported through setPushPermission(), which waits for
     // init, so the stored value is always the latest one at this point.
     const storedPermission = parsePermissionRecord(await this.storage.get(PERMISSION_KEY));
+    const storedOS = await this.storage.get(PERMISSION_OS_KEY);
+    if (this.osPermission === null && isPushPermissionStatus(storedOS)) this.osPermission = storedOS;
     if (storedPermission) {
       // reset() before init: the next report is a fresh one.
       if (this.pushCleared) this.setPermission({ status: storedPermission.status });
@@ -953,6 +995,55 @@ export class WhisperrClient implements WhisperrApi {
     void this.storage.set(PERMISSION_KEY, JSON.stringify(record));
   }
 
+  private setOSPermission(status: PushPermissionStatus): void {
+    if (this.osPermission === status) return;
+    this.osPermission = status;
+    void this.storage.set(PERMISSION_OS_KEY, status);
+  }
+
+  /** The OS permission from pushPermissionReader or an installed peer; undefined when unknown. */
+  private async readOSPermission(): Promise<PushPermissionStatus | undefined> {
+    try {
+      const status = this.permissionReader ? await this.permissionReader() : await readPermission();
+      return isPushPermissionStatus(status) ? status : undefined;
+    } catch (error) {
+      this.log(`push permission read failed: ${String(error)}`);
+      return undefined;
+    }
+  }
+
+  /**
+   * automaticPushPermission: reads the OS permission and reports it when it
+   * differs from the last read, or when nothing was sent since install or
+   * reset(). A status the app set with setPushPermission() therefore stands
+   * until the OS setting changes. One read at a time; a read asked for while
+   * one runs follows it.
+   */
+  private autoReadPermission(): void {
+    if (!this.autoPermission || this.closed) return;
+    if (this.permissionRead) {
+      this.permissionReread = true;
+      return;
+    }
+    this.permissionRead = (async () => {
+      await this.initPromise;
+      if (this.muted || this.closed) return;
+      const status = await this.readOSPermission();
+      if (!status || this.muted || this.closed) return;
+      const report = status !== this.osPermission || !this.permission?.sent;
+      this.setOSPermission(status);
+      if (report) this.applyPermission(status);
+    })()
+      .catch(() => {})
+      .finally(() => {
+        this.permissionRead = null;
+        if (this.permissionReread) {
+          this.permissionReread = false;
+          this.autoReadPermission();
+        }
+      });
+  }
+
   /**
    * optOut() tells the server about this device: when this client holds a
    * last-sent pair, one identify opts that token out under the pair's
@@ -1043,6 +1134,9 @@ export class WhisperrClient implements WhisperrApi {
       // After app_backgrounded is queued, so the last foreground period ships now.
       void queued.then(() => this.drainQueue());
     }
+    // Back in the foreground, or back from a system dialog such as the
+    // permission prompt (iOS: inactive → active; Android: background → active).
+    if (state === "active") this.autoReadPermission();
   }
 
   private async captureLaunch(
