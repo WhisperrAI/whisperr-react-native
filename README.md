@@ -29,8 +29,9 @@ whisperr.reset();
 - **Automatic app signals** — installed, updated, opened, backgrounded, with
   app / OS / locale / timezone context. No code needed.
 - **Anonymous → identified** — events before login are sent right away under an
-  anonymous id; `identify()` promotes them to the user, `reset()` starts a new
-  anonymous visitor.
+  anonymous id; `identify()` promotes them to the user, `reset()` after a
+  login starts a new anonymous visitor. `reset()` with no user does nothing,
+  so it is safe to call on every signed-out state.
 - **Never loses events** — durable on-device queue (AsyncStorage by default),
   automatic flush when the app backgrounds, batching, retry/backoff, and a
   stable `$message_id` per event so the backend dedups at-least-once retries.
@@ -374,7 +375,8 @@ when you know it:
   restarts** — and a rotation that happens after a relaunch still opts out the
   stale token.
 - `reset()` (logout) moves the token: it opts the token out for the old user,
-  makes a new anonymous id, and opts the token in under it.
+  makes a new anonymous id, and opts the token in under it. Without a user
+  it keeps the token where it is.
 - **Re-registration:** the SDK sends the same token again at most once every
   7 days, at launch. The server uses it to tell a live device from a stale
   one.
@@ -402,7 +404,7 @@ const status = await whisperr.requestPushAuthorization({ provisional: true }); /
   `not_determined`; `provisional` and `denied` stay the same.
   `previous_status` is the last status sent from this device. The SDK stores
   that status, so a repeated report sends nothing, also after a restart.
-  `reset()` forgets it, so the next user gets a fresh report.
+  `reset()` after a login forgets it, so the next user gets a fresh report.
 - Before login, the event goes out under the anonymous id.
 - `denied` opts this device's token out, so the engine does not choose push
   for it. While the status is `denied`, `setPushToken()` holds the token back.

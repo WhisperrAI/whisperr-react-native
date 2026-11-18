@@ -427,21 +427,20 @@ describe("lifecycle", () => {
     expect(identifyCalls()[0]!.body).toEqual({ external_user_id: "user_2", anonymous_id: second.anonymous_id });
   });
 
-  it("reset() keeps an earlier visitor's queued events off the next user", async () => {
+  it("reset() keeps an earlier user's queued events off the next user", async () => {
     status = 503;
     const w = makeClient();
-    w.track("pricing_viewed"); // visitor A, held in the queue
+    w.identify("user_1");
+    w.track("pricing_viewed"); // user_1, held in the queue
     await w.flush();
-    const handleA = batchCalls()[0]!.body.events[0].anonymous_id;
     w.reset();
-    w.identify("user_2"); // visitor B logs in
+    w.identify("user_2"); // the next person logs in
     status = 200;
     captured = [];
     await w.flush();
 
     const ev = batchCalls()[0]!.body.events[0];
-    expect(ev.anonymous_id).toBe(handleA);
-    expect(ev.external_user_id).toBeUndefined();
+    expect(ev.external_user_id).toBe("user_1");
   });
 
   it("reset() moves the token to a new anonymous handle; the next login takes it, after a restart too", async () => {

@@ -262,6 +262,90 @@ describe("setPushPermission", () => {
     expect(identifies.filter((b) => b.channels)).toEqual([]);
   });
 
+  it("reset() without a user keeps the handle and the sent status: identify() promotes the one handle", async () => {
+    // An app that calls reset() on every signed-out state and reports the
+    // permission after it: each call used to mint a new anonymous user with a
+    // fresh report, and identify() promoted only the last one.
+    const w = makeClient();
+    for (let i = 0; i < 3; i++) {
+      w.reset();
+      w.setPushPermission("denied");
+      w.track("pricing_viewed");
+      await settle(w);
+    }
+    w.identify("user_1");
+    await settle(w);
+
+    expect(permissionEvents()).toEqual([{ status: "denied" }]);
+    const handles = new Set(events.map((e) => e.anonymous_id));
+    expect(handles.size).toBe(1);
+    expect(identifies).toEqual([{ external_user_id: "user_1", anonymous_id: [...handles][0] }]);
+  });
+
+  it("reset() after identify() rotates once; a second reset() keeps the new handle", async () => {
+    const w = makeClient();
+    w.track("pricing_viewed");
+    w.identify("user_1");
+    w.setPushPermission("denied");
+    await settle(w);
+    w.reset();
+    w.track("pricing_viewed");
+    w.setPushPermission("denied"); // the next visitor's fresh report
+    await settle(w);
+    w.reset();
+    w.track("pricing_viewed");
+    w.setPushPermission("denied");
+    await settle(w);
+
+    const anonymous = events.filter((e) => e.event_type === "pricing_viewed").map((e) => e.anonymous_id);
+    expect(anonymous[1]).not.toBe(anonymous[0]);
+    expect(anonymous[2]).toBe(anonymous[1]);
+    expect(permissionEvents()).toEqual([{ status: "denied" }, { status: "denied" }]);
+  });
+
+  it("reset() at start, before the stored state is read: no stored user keeps everything", async () => {
+    const storage = new MemoryStorage();
+    const first = makeClient({ storage });
+    first.track("pricing_viewed");
+    first.setPushPermission("denied");
+    await settle(first);
+    await first.close();
+
+    const second = makeClient({ storage });
+    second.track("pricing_viewed"); // captured before init, before the reset
+    second.reset(); // the same tick as construction
+    second.setPushPermission("denied");
+    second.identify("user_1");
+    await settle(second);
+
+    expect(permissionEvents()).toEqual([{ status: "denied" }]);
+    const [before, after] = events.filter((e) => e.event_type === "pricing_viewed");
+    expect(after.external_user_id).toBe("user_1"); // the same visitor, who just logged in
+    expect(identifies).toEqual([{ external_user_id: "user_1", anonymous_id: before.anonymous_id }]);
+  });
+
+  it("reset() at start, before the stored state is read: a stored user is still logged out", async () => {
+    const storage = new MemoryStorage();
+    const first = makeClient({ storage });
+    first.identify("user_1");
+    first.setPushPermission("denied");
+    await settle(first);
+    await first.close();
+    identifies = [];
+
+    const second = makeClient({ storage });
+    second.reset(); // the same tick as construction
+    second.track("pricing_viewed");
+    second.setPushPermission("denied"); // the next visitor's fresh report
+    await settle(second);
+
+    expect(identifies).toEqual([]); // no restore identify for the logged-out user
+    expect(permissionEvents()).toEqual([{ status: "denied" }, { status: "denied" }]);
+    const ev = events.find((e) => e.event_type === "pricing_viewed");
+    expect(ev.external_user_id).toBeUndefined();
+    expect(ev.anonymous_id).toBeTruthy();
+  });
+
   it("an upgrade from 0.4.x sends the stored status once, and keeps its denied gate", async () => {
     const storage = new MemoryStorage();
     storage.setItem("whisperr.user_id", "user_1");

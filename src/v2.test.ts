@@ -5,7 +5,7 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { __setPlatform } from "../test/react-native.js";
-import { loadFixture } from "../test/spec.js";
+import { loadFixture, supersededIn } from "../test/spec.js";
 import { SDK_NAME } from "./autocapture.js";
 import { WhisperrClient } from "./client.js";
 import { LIB_VERSION } from "./runtime.js";
@@ -65,6 +65,8 @@ interface V2Section {
 
 const spec = await loadFixture<{ sections: Record<string, V2Section> }>("v2.json", "WHISPERR_V2_SPEC_PATH");
 const sections = Object.entries(spec.sections).filter(([, s]) => s.appliesTo.includes("mobile"));
+// A later section may supersede a case of an earlier one (`v2.json:<case>`).
+const superseded = supersededIn("v2.json", sections.map(([, s]) => s));
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -77,12 +79,13 @@ afterEach(() => {
 describe("contract v2 conformance (whisperr-spec v2.json)", () => {
   it("has the mobile sections", () => {
     expect(sections.map(([name]) => name).sort()).toEqual(
-      ["anonymousPush", "appLanguage", "pushRegistration", "restoreIdentify", "versionContext"].sort(),
+      ["anonymousPush", "anonymousReset", "appLanguage", "pushRegistration", "restoreIdentify", "versionContext"].sort(),
     );
   });
   for (const [name, section] of sections) {
     describe(name, () => {
-      it.each(section.cases.map((c) => [c.name, c] as const))("%s", (_n, c) => runCase(c));
+      const cases = section.cases.filter((c) => !superseded.has(c.name));
+      it.each(cases.map((c) => [c.name, c] as const))("%s", (_n, c) => runCase(c));
     });
   }
 });

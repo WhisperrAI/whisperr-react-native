@@ -215,6 +215,8 @@ export class WhisperrClient implements WhisperrApi {
   private readonly priorState: Promise<boolean>;
   /** The last-sent pair an earlier launch persisted, read before this launch can write one. */
   private readonly launchPush: Promise<string | null>;
+  /** The user an earlier launch persisted, read before this launch's identify() can write one. */
+  private readonly launchUser: Promise<string | null>;
   /** The app language an earlier launch persisted, read before this launch can write one. */
   private readonly launchLanguage: Promise<string | null>;
   /** setAppLanguage(): the language the user picked; null when unset. */
@@ -249,6 +251,12 @@ export class WhisperrClient implements WhisperrApi {
   private identityTouched = false;
   /** reset() ran before init resolved — don't restore the persisted push pair. */
   private pushCleared = false;
+  /**
+   * reset() ran before init resolved with no user known yet: init logs out a
+   * stored user, or keeps everything. The handle stamped on the events
+   * captured before that reset (a one-off one if a user is logged out).
+   */
+  private earlyResetHandle: string | null = null;
   private drainChain: Promise<void> = Promise.resolve();
   private flushTimer: ReturnType<typeof setInterval> | null = null;
   private removeLifecycle: () => void = () => {};
@@ -336,6 +344,7 @@ export class WhisperrClient implements WhisperrApi {
       values.some((v) => v !== null),
     );
     this.launchPush = this.storage.get(PUSH_KEY);
+    this.launchUser = this.storage.get(USER_KEY);
     this.launchLanguage = this.storage.get(APP_LANGUAGE_KEY);
     this.launchRun = this.storage.get(RUN_KEY);
     this.launchFatal = this.storage.get(FATAL_KEY);
@@ -614,8 +623,22 @@ export class WhisperrClient implements WhisperrApi {
 
   reset(): void {
     if (this.closed) return;
+    if (!this.userId) {
+      // No user to log out: the device is still the same anonymous visitor,
+      // so the handle, the sent permission and the push pair stay (whisperr-spec:
+      // Anonymous visitors). Rotating here would mint one anonymous user per
+      // call, each with a fresh push_permission_changed, and identify() promotes
+      // only the last handle. Before init a stored user may still be restored:
+      // init decides (unless a reset() already ran this launch).
+      if (!this.initialized && !this.identityTouched) {
+        this.earlyResetHandle ??= uuid();
+        this.queue.stampAnonymousId(this.earlyResetHandle);
+      }
+      return;
+    }
     const wasInitialized = this.initialized;
     if (!wasInitialized) {
+      this.earlyResetHandle = null; // its events keep their one-off handle
       // The previous handle is still being read from storage. Settle what was
       // captured before this logout now so none of it can attach to the next
       // person: identifies promote nothing, anonymous events get a one-off handle.
@@ -704,7 +727,8 @@ export class WhisperrClient implements WhisperrApi {
     if (await this.storage.get(OPTOUT_KEY)) this.optedOut = true;
 
     const anon = await this.storage.get(ANON_KEY);
-    const persistedUser = await this.storage.get(USER_KEY);
+    const persistedUser = await this.launchUser;
+    if (this.earlyResetHandle) this.settleEarlyReset(this.earlyResetHandle, !!persistedUser);
     if (this.anonId === "") {
       // Handles minted by SDK 0.2.x look like "anon_<uuid>"; they stay valid
       // (1–128 chars), so an existing visitor keeps their handle.
@@ -792,6 +816,34 @@ export class WhisperrClient implements WhisperrApi {
       this.sendAppLanguage(this.appLanguage);
     }
     this.settlePushAtLaunch(this.pushCleared ? launchPair : null);
+  }
+
+  /**
+   * A reset() before init, with no user known then: with a stored user it
+   * logs that user out as reset() does, otherwise it changed nothing and the
+   * events captured before it go out under the device's handle.
+   */
+  private settleEarlyReset(handle: string, storedUser: boolean): void {
+    this.earlyResetHandle = null;
+    if (!storedUser) {
+      this.queue.rewrite((op) => {
+        if (op.kind !== "track" || op.anonymousId !== handle) return op;
+        const { anonymousId: _drop, ...rest } = op;
+        return rest; // stamped (or claimed by an identify) below like any other
+      });
+      return;
+    }
+    // Events captured before it keep the one-off handle; nothing of the stored
+    // user's survives (an identify() since then is the next user).
+    this.identityTouched = true;
+    this.anonRotatedBeforeInit = true;
+    this.pushCleared = true; // init moves the stored pair's token and re-reports the permission
+    this.setRestoreRecord(null);
+    if (!this.userId) void this.storage.remove(USER_KEY);
+    if (!this.lastPush) this.forgetLastPush();
+    this.anonId = uuid();
+    void this.storage.set(ANON_KEY, this.anonId);
+    this.setAnonUsed(false);
   }
 
   /**
