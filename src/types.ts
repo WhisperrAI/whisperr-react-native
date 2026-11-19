@@ -309,7 +309,7 @@ export interface WhisperrApi {
    * last-sent (subject, token) pair is persisted, so both hold across app
    * restarts. Before identify() it goes out at once in an anonymous identify
    * (`anonymous_id` + the push channel); the next identify() carries it.
-   * reset() moves it to the new anonymous id.
+   * reset() after a login moves it to the new anonymous id.
    *
    * - A string sends no kind; the server infers it.
    * - `{ token, kind?, platform?, pushEnv?, clientAppId?, providerProject? }`
@@ -381,6 +381,12 @@ export interface WhisperrApi {
    * held `app_opened` goes out first.
    */
   flush(): Promise<void>;
+  /**
+   * Logout: forgets the user, starts a new anonymous id, moves the push token
+   * to it and forgets the sent push permission. Without a user it does
+   * nothing (the device is still the same anonymous visitor), so it is safe
+   * to call on every signed-out state.
+   */
   reset(): void;
   /** Resumes capture after optOut(). The next setPushToken() registers the token again. */
   optIn(): void;

@@ -10,6 +10,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
+// To test against an unmerged spec branch, set it here and as `ref:` in ci.yml.
 export const SPEC_REF = "main";
 
 const realFetch = globalThis.fetch.bind(globalThis);
